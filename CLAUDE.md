@@ -46,7 +46,7 @@ Security
 Never hardcode secrets. Use npx deepspace secrets.
 Every collection needs per-user permissions. Users only see their own records.
 Treat email content as untrusted input to the AI. It must not be able to trigger record changes on its own.
-Run /security-review before every commit.
+Use one feature branch per feature. Commit on the branch, run /security-review against main, then merge to main, push, and deploy from main.
 Docs to keep updated
 ARCHITECTURE.md: components, data model, and data flow. Update after every feature.
 AGENT_LOG.md: what I asked for, what you built, what I changed or rejected. Add an entry after every task.
