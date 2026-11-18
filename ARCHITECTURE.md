@@ -6,7 +6,7 @@ applytrack is a job application tracker built on the DeepSpace SDK. It runs as o
 - App id: `app_01M7P97V5G7E91CNSA08EPWQ0F` (immutable; data and secrets key to it)
 - Source: GitHub (`aankouni12/DeepSpace_Job_Tracker`, `main`). This was claimed permanently at the first deploy. Deploys ship the local working tree.
 
-**Status:** unmodified `starter` scaffold (deepspace 0.44.2), renamed to applytrack. No job-tracker features yet. Sections marked *planned* describe intent, not code.
+**Status:** `starter` scaffold (deepspace 0.44.2), renamed to applytrack. Data model in place (`applications`, `emails`). No UI or sync yet. Sections marked *planned* describe intent, not code.
 
 ## Project layout
 
@@ -22,7 +22,7 @@ src/
   constants.ts             APP_NAME, APP_ID, SCOPE_ID = `app:${APP_ID}`
   nav.ts                   Navigation bar entries
   schemas.ts               Array of every collection schema (shared by worker and frontend)
-  schemas/                 One file per collection (users-schema.ts, admin-schema.ts)
+  schemas/                 One file per collection (users, settings, applications, emails) + permissions.test.ts
   pages/                   Routes. Folder determines what a page gets (see below)
   components/              App components; components/ui/ holds local UI primitives
   server/
@@ -93,14 +93,49 @@ The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOP
 
 ## Data model
 
-Current (scaffold):
+| Collection | File | Purpose | Permissions |
+|---|---|---|---|
+| `users` | `users-schema.ts` | Platform user profile (`USERS_COLUMNS`); required, do not rename | viewer/member: read and update own; admin: all |
+| `settings` | `admin-schema.ts` | App settings | admin |
+| `applications` | `applications-schema.ts` | One row per user, company and role | member/admin: read own, update own (`status` only); no client create or delete |
+| `emails` | `emails-schema.ts` | Application timeline and sync ledger | member/admin: read own only |
 
-| Collection | Purpose | Permissions |
-|---|---|---|
-| `users` | Platform user profile (`USERS_COLUMNS`); required, do not rename | viewer/member: read and update own; admin: all |
-| `settings` | App settings (`admin-schema.ts`) | admin |
+**`applications`**
 
-*Planned:* `applications` (one per company and role, with status Applied, Interview, Offer or Rejected) and an email timeline. Every collection will use `own` read and write permissions so users see only their own records.
+| Column | Notes |
+|---|---|
+| `userId` | Owner; immutable |
+| `company`, `role` | |
+| `key` | Normalized `company\|role` |
+| `status` | `applied` / `interview` / `offer` / `rejected` |
+| `source` | `gmail` / `demo` |
+| `lastActivityAt` | Datetime |
+
+`uniqueOn: ['userId', 'key']`
+
+**`emails`**
+
+| Column | Notes |
+|---|---|
+| `userId` | Owner; immutable |
+| `gmailMessageId` | |
+| `source` | `gmail` / `demo` |
+| `classification` | The four statuses, or `not_job_related` |
+| `applicationId` | Reference to `applications`; empty when not job-related |
+| `receivedAt` | Datetime |
+| `from`, `subject`, `snippet` | Empty for not-job-related mail |
+
+`uniqueOn: ['userId', 'gmailMessageId']`
+
+**Ownership rules:**
+- Rows are created only by server code (the sync job). By default, `'own'` checks the row's creator, which would be the job, so both collections set `ownerField: 'userId'`.
+- `userId` is deliberately **not** `userBound`. With `create: false` for every client role, `userBound` would stamp the writer's ID over the intended owner (docs: concepts/permissions).
+- Admin is also `'own'`, so the app owner does not see other users' applications.
+- `'*'` (signed out) and `viewer` are closed.
+
+**Sync idempotency:** every processed message gets an `emails` row, including not-job-related ones. A re-sync skips any `gmailMessageId` already stored for that user. The uniqueness rule is per user, so every demo user can have the same seeded message IDs.
+
+**Tests:** `src/schemas/permissions.test.ts` runs both schemas through the SDK's own RBAC functions (`canRead`, `canUpdate`, `checkFieldPermissions`, `lintSchemas`). Run it with `npx vitest run` from `C:\dev\...`. With a lowercase `c:` working directory, vitest loads twice on Windows and every suite fails.
 
 ## Data flow
 
