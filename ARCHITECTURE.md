@@ -6,7 +6,7 @@ applytrack is a job application tracker built on the DeepSpace SDK. It runs as o
 - App id: `app_01M7P97V5G7E91CNSA08EPWQ0F` (immutable; data and secrets key to it)
 - Source: GitHub (`aankouni12/DeepSpace_Job_Tracker`, `main`). This was claimed permanently at the first deploy. Deploys ship the local working tree.
 
-**Status:** `starter` scaffold (deepspace 0.44.2), renamed to applytrack. Data model in place (`applications`, `emails`). No UI or sync yet. Sections marked *planned* describe intent, not code.
+**Status:** `starter` scaffold (deepspace 0.44.2), renamed to applytrack. Data model and server-side sync (Gmail and demo) in place. No board UI yet. Sections marked *planned* describe intent, not code.
 
 ## Project layout
 
@@ -22,14 +22,16 @@ src/
   constants.ts             APP_NAME, APP_ID, SCOPE_ID = `app:${APP_ID}`
   nav.ts                   Navigation bar entries
   schemas.ts               Array of every collection schema (shared by worker and frontend)
-  schemas/                 One file per collection (users, settings, applications, emails) + permissions.test.ts
+  schemas/                 One file per collection (users, settings, applications, emails, syncState) + permissions.test.ts
   pages/                   Routes. Folder determines what a page gets (see below)
   components/              App components; components/ui/ holds local UI primitives
   server/
     http-routes.ts         Auth proxy, integrations proxy, files, static/SPA fallback
     realtime-routes.ts     WebSocket routes to Durable Objects, with JWT verification
     action-routes.ts       POST /api/actions/:name (server actions)
-  actions/index.ts         Server action handlers (empty)
+  actions/index.ts         Server action registry: { sync }
+  actions/sync.ts          Sync action: rate limit, fetch, classify, write (+ sync.test.ts)
+  actions/demo-emails.ts   10 fictional demo emails, one a prompt-injection attempt
   ai/
     tools.ts               buildTools: AI tool definitions over records
     agent.ts               registerAgent: exposes tools over HTTP / MCP / browser
@@ -99,6 +101,7 @@ The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOP
 | `settings` | `admin-schema.ts` | App settings | admin |
 | `applications` | `applications-schema.ts` | One row per user, company and role | member/admin: read own, update own (`status` only); no client create or delete |
 | `emails` | `emails-schema.ts` | Application timeline and sync ledger | member/admin: read own only |
+| `syncState` | `sync-state-schema.ts` | One row per user (record ID = userId): `lastSyncAt` for the rate limit | member/admin: read own only. Not on `users`, because members can update their own `users` row |
 
 **`applications`**
 
@@ -135,7 +138,7 @@ The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOP
 
 **Sync idempotency:** every processed message gets an `emails` row, including not-job-related ones. A re-sync skips any `gmailMessageId` already stored for that user. The uniqueness rule is per user, so every demo user can have the same seeded message IDs.
 
-**Tests:** `src/schemas/permissions.test.ts` runs both schemas through the SDK's own RBAC functions (`canRead`, `canUpdate`, `checkFieldPermissions`, `lintSchemas`). Run it with `npx vitest run` from `C:\dev\...`. With a lowercase `c:` working directory, vitest loads twice on Windows and every suite fails.
+**Tests:** `src/schemas/permissions.test.ts` runs all three schemas through the SDK's own RBAC functions (`canRead`, `canUpdate`, `checkFieldPermissions`, `lintSchemas`). Run it with `npx vitest run` from `C:\dev\...`. With a lowercase `c:` working directory, vitest loads twice on Windows and every suite fails.
 
 ## Data flow
 
@@ -158,7 +161,7 @@ The browser never talks to the database directly; the WebSocket in step 3 is the
 
 Google is `user`-billed: each user connects their own Gmail, and each call bills that user ($0.013). The connection is read-only. `GET /api/integrations/status` reports `gmailRead: true`, `gmailModify: false`, `gmailSend: false`. An unconnected user gets `data.requiresOAuth` and an `authUrl`.
 
-### Sync (*planned*: a server action, no jobs or cron)
+### Sync (`src/actions/sync.ts`: a server action, no jobs or cron)
 
 The spike on 2026-11-18 showed that a background job **cannot** read a user's Gmail through any documented path:
 - A job knows only `enqueuedBy`, a user ID. It has no JWT for that user.
@@ -166,12 +169,34 @@ The spike on 2026-11-18 showed that a background job **cannot** read a user's Gm
 
 So sync runs inside the user's own request:
 
-1. **Trigger:** the client calls `POST /api/actions/sync` with the user's JWT, either from a "Sync now" button or automatically when the board opens and the last sync is more than 24 hours old (*sync on open*). Demo mode calls the same action with `source: 'demo'` and skips the Gmail fetch.
-2. **Rate limit:** one sync per user per 10 minutes. Exactly where the last-sync time is stored is settled in the sync feature's plan.
-3. **Fetch:** one `google/gmail-inbox` call (`format: 'metadata'`, at most 50 messages) with the caller's JWT. Each message has `id`, `snippet` (about 200 characters), `internalDate` (epoch milliseconds) and `payload.headers` (`From`, `Subject`, `Date`). There's no body, which also limits how much untrusted text reaches the AI.
-4. **Skip known messages:** drop IDs already in `emails` for this user, before any AI call.
-5. **Classify** the rest in small batches with `createDeepSpaceAI` and **no `authToken`**, so the app owner pays. This was verified with a zero-credit, non-owner test account. Reviewers without credits can therefore run demo mode. The AI returns labels only; our code validates them.
-6. **Write after each batch:** `applications` and `emails` rows with `userId = auth.userId`, so cards appear live while sync runs. The UI shows a syncing state until the action returns.
+1. **Trigger** (*planned*, board feature): the client calls `POST /api/actions/sync` with `{ source: 'gmail' | 'demo' }` and the user's JWT, either from a "Sync now" button or automatically when the board opens and the last sync is more than 24 hours old (*sync on open*). Demo mode uses the same action and skips the Gmail fetch.
+2. **Rate limit check:** if the `syncState` row (record ID = userId) has `lastSyncAt` within 10 minutes, the action returns `{ success: false, code: 'rate_limited', details: { retryAfterSeconds } }`.
+3. **Fetch:**
+   - Gmail: one `google/gmail-inbox` call (`format: 'metadata'`, `maxResults: 50`, `q: 'newer_than:30d'`) with the caller's JWT through `tools.integration`. Each message has `id`, `snippet` (about 200 characters), `internalDate` (epoch milliseconds) and `payload.headers` (`From`, `Subject`, `Date`). There's no body, which also limits how much untrusted text reaches the AI. An unconnected user gets `{ requiresOAuth, authUrl }` back.
+   - Demo: `DEMO_EMAILS`, dated relative to now.
+4. **Claim the slot:** write `lastSyncAt = now`. This happens after the fetch, so a `requiresOAuth` round trip doesn't lock the user out, and before any AI call.
+   - **Known race, accepted on purpose:** two requests in the same instant can both pass the check, because the records API has no compare-and-set. The cost is bounded: one extra sync of at most 50 messages, and step 5 makes repeats cheap.
+5. **Skip known messages:** page through this user's `emails` rows and drop IDs already recorded, before any AI call. A second demo sync therefore costs nothing for AI.
+6. **Classify oldest first in batches of 10** with `claude-haiku-5-5` through `createDeepSpaceAI` and **no `authToken`**, so the app owner pays. Verified with a zero-credit, non-owner test account. Measured: one demo sync of 10 emails cost the owner **$0.00045 (≈0.045 credits)**.
+   - The model sees only `id`, `from`, `subject` and `snippet` as JSON. The system prompt says email text is untrusted and that instruction-like emails are `not_job_related`.
+   - It returns `{ id, label, company, role }` per email. `validateBatch` decides what is accepted:
+     - **Whole batch:** if the call fails or the output isn't `{ results: [...] }`, nothing is written for that batch. Those emails stay unknown and are retried next sync.
+     - **Per item:** an unknown ID is ignored. A label outside the five, an empty or too-long company, or a **company that doesn't appear in that email's own text** gives `not_job_related`. The last rule means one email can't assign a company to another.
+     - An empty role becomes `Unspecified role`.
+7. **Write after each batch**, with `userId` taken only from the verified caller:
+   - Each job email finds its application by `normalizeKey(company, role)`, or creates one. The key is lowercased, punctuation stripped, whitespace collapsed, and a trailing company suffix `inc`/`llc`/`ltd`/`corp`/`co` dropped.
+   - The status changes only when the email is at least as new as `lastActivityAt`, so an old "applied" email can't overwrite a newer "interview".
+   - An `emails` row is written for every email. Not-job-related rows keep only ID, label and date.
+   - The UI's syncing state (*planned*) lasts until the action returns.
+
+**Tests:**
+- `src/actions/sync.test.ts` covers normalization, Gmail parsing, item and batch failures, and oldest-first order.
+- `tests/sync-demo.spec.ts` runs a real demo sync as test account A, then checks:
+  - all 10 labels;
+  - exactly 3 applications, with no `acme` (demo-9 is the injection attempt);
+  - no content kept on not-job-related rows;
+  - a second sync gets `rate_limited`;
+  - test account B sees none of A's rows.
 
 **Why not `AppJobRoom`:** job rows live in one app-wide queue (`app:<APP_ID>`). Every member can watch it, and each update sends the whole job (`payload`, `result`, `progressMessage`) to every watcher (deepspace 0.44.2 `dist/worker.js`: 4814, 5226–5240, 5374). Email content in a job would leak to other users. `AppJobRoom` and `AppCronRoom` stay in the scaffold but are unused.
 

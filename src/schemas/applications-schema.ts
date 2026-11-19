@@ -1,7 +1,7 @@
 /**
  * Applications — one row per (user, company, role).
  *
- * Rows are created only by server code (the sync job), so ownership is the
+ * Rows are created only by server code (the sync action), so ownership is the
  * explicit `userId` column, not the row creator. `userId` is deliberately NOT
  * `userBound`: with `create: false` for every client role, `userBound` would
  * stamp the writer's id over the intended owner (docs: concepts/permissions).
@@ -28,7 +28,7 @@ export const applicationsSchema: CollectionSchema = {
     { name: 'userId', storage: 'text', interpretation: 'plain', required: true, immutable: true },
     { name: 'company', storage: 'text', interpretation: 'plain', required: true, maxLength: 200 },
     { name: 'role', storage: 'text', interpretation: 'plain', required: true, maxLength: 200 },
-    // Normalized `company|role`; with userId, the dedupe key for the sync job.
+    // normalizeKey(company, role) from src/actions/sync.ts; with userId, the dedupe key.
     { name: 'key', storage: 'text', interpretation: 'plain', required: true, immutable: true, maxLength: 401 },
     {
       name: 'status',

@@ -3,10 +3,12 @@
  * RBAC functions (the ones RecordRoom enforces with).
  */
 import { describe, expect, it } from 'vitest'
+import type { CollectionSchema } from 'deepspace/schema'
 import { canCreate, canDelete, canRead, canUpdate, checkFieldPermissions, lintSchemas } from 'deepspace/worker'
 import { schemas } from '../schemas'
 import { applicationsSchema } from './applications-schema'
 import { emailsSchema } from './emails-schema'
+import { syncStateSchema } from './sync-state-schema'
 
 const ALICE = 'user-alice'
 const BOB = 'user-bob'
@@ -21,6 +23,10 @@ const aliceEmail = {
   createdBy: JOB,
   data: { userId: ALICE, gmailMessageId: 'm1', source: 'demo', classification: 'applied' },
 }
+const aliceSyncState = {
+  createdBy: JOB,
+  data: { userId: ALICE, lastSyncAt: '2026-11-18T00:00:00.000Z' },
+}
 
 describe('schema lint', () => {
   it('has no warnings', () => {
@@ -28,8 +34,13 @@ describe('schema lint', () => {
   })
 })
 
-for (const schema of [applicationsSchema, emailsSchema]) {
-  const record = schema === applicationsSchema ? aliceApp : aliceEmail
+const fixtures = new Map<CollectionSchema, { createdBy: string; data: Record<string, unknown> }>([
+  [applicationsSchema, aliceApp],
+  [emailsSchema, aliceEmail],
+  [syncStateSchema, aliceSyncState],
+])
+
+for (const [schema, record] of fixtures) {
 
   describe(`${schema.name} permissions`, () => {
     it('owner (by userId, not creator) can read; others cannot', () => {
@@ -74,6 +85,14 @@ describe('emails updates', () => {
   it('read-only for everyone, including the owner', () => {
     for (const role of ['member', 'admin']) {
       expect(canUpdate(emailsSchema, role, aliceEmail, ALICE)).toBe(false)
+    }
+  })
+})
+
+describe('syncState updates', () => {
+  it('owner cannot reset their own rate limit', () => {
+    for (const role of ['member', 'admin']) {
+      expect(canUpdate(syncStateSchema, role, aliceSyncState, ALICE)).toBe(false)
     }
   })
 })
