@@ -112,3 +112,64 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 **Problem found:** every vitest suite, including the scaffold's own, failed with "Vitest failed to find the current suite".
 - Hypothesis: the working directory was lowercase `c:\dev\...` while vitest resolves `C:/dev/...`, so Node loads vitest twice.
 - Test: reran from uppercase `C:\dev\deepspace-job-tracker`, and all 13 tests passed. No code change; unit tests run from `C:\`.
+
+**Follow-up before merging feature 1 (2026-11-17, requested by user):**
+- Agent explained uniqueness:
+  - `gmailMessageId` is unique per user (`uniqueOn: ['userId', 'gmailMessageId']`).
+  - `applications.key` will be built by sync code as normalized `company|role`. Not implemented yet.
+- Agent listed the denial cases `permissions.test.ts` covers.
+- User added two Security rules to CLAUDE.md:
+  - Sync and demo code sets `userId` only from the verified caller.
+  - Never set `ALLOW_DEBUG_ROUTES` on the deployed app.
+- Live check after deploy:
+  - `secrets list` was empty.
+  - `schema_list` showed both collections.
+  - `records_create` on `applications` as the owner was refused with `CREATE DENIED: role=admin`.
+  - `logs --search schema-lint` returned 0 warnings.
+
+---
+
+## 2026-11-18: Spike, can background code read Gmail as the user?
+
+**Asked:** On a throwaway branch (`spike/gmail-as-user`, never merged), answer four questions from docs.deep.space and the SDK, then prove them with the smallest tests:
+1. Can a job read Gmail as the user who started it?
+2. If not, what is the documented way?
+3. Who pays for AI calls from server code?
+4. What do `gmail-list`'s parameters, scopes and messages look like?
+
+**Findings (docs and deepspace 0.44.2 types):**
+- **Q1, no.** A job knows only `job.enqueuedBy`, a user ID. It holds no JWT, and `JobContext` has none either. The only server credential is `APP_OWNER_JWT`. Google tokens are stored per JWT subject (Google OAuth guide), so the owner's JWT reads the owner's mailbox. `enqueuedBy` itself is trustworthy: for browser-started jobs it comes from the verified WebSocket user (`dist/worker.js:4888`).
+- **Q2, none for `google/*`.** Only Composio documents background access, via `callComposio(..., { asUser })`, which sends the owner JWT plus `x-act-as-user`. Nothing says the API worker honors that header for Google.
+- **Q3, the JWT subject pays.** `createDeepSpaceAI` with no `authToken` falls back to `APP_OWNER_JWT`, so the owner pays. There's no billing override. `google/*` must stay user-billed, and test accounts have no credits, so user-billed calls fail with 402.
+- **Q4.** `gmail-list` returns message IDs only. **`gmail-inbox` lists and fetches messages in one call** ($0.013, up to 50 per page, takes `q`, `format`, `labelIds`, `pageToken`), so the design uses it.
+- **Also found: the job queue is visible to every member.** Read access defaults to write access (`dist/worker.js:4814`), and write access defaults to member/admin (`worker.js:4813`, and our `worker.ts:72`). Each broadcast sends the full job to every authorized socket (`worker.js:5226-5240`). The job view includes `payload`, `result` and `progressMessage` (`worker.js:5374`, `rowToJobView`), and it goes out on enqueue, progress, success and failure (`worker.js:1344-1350`). Email content in a job would therefore reach every signed-in member.
+
+**Tests run:**
+- **T1** (user, browser console on the live app, no code): `POST /api/integrations/google/gmail-inbox` with the user's JWT, `format: metadata`, `maxResults: 3`.
+  - The first call asked for consent. The user recalls the screen asking only for read access; the status flags below confirm it.
+  - The second call returned HTTP 200 with `messages`, `nextPageToken` and `resultSizeEstimate`.
+  - Each message has `id`, `threadId`, `labelIds`, `snippet` (201 characters), `payload` (`mimeType`, `headers`: Date, Message-ID, Subject, From, To), `sizeEstimate`, `historyId` and `internalDate` (epoch milliseconds as a string). There's no body.
+  - `partialErrors` is missing when nothing failed.
+- **Connection status** (`GET /api/integrations/status`): `gmailRead: true`, `gmailModify: false`, `gmailSend: false`. Calendar, Drive and Contacts are all false. **Read access only.**
+- **T3** (temporary action `spikeAiBilling`, one Haiku call with no `authToken`):
+  - Called by the owner: HTTP 200, and the owner's usage showed `anthropic` count 1.
+  - **T3b:** a zero-credit, **non-owner** test account (`reviewer@deepspace.test`) called it from a throwaway Playwright spec. HTTP 200, and the owner's usage went to `anthropic` count 2. **Proven: AI from an action bills the owner whoever the caller is.**
+- **T2** (`x-act-as-user` for Google) **skipped by user decision.** We won't depend on undocumented behavior.
+
+**Decisions (user):**
+1. Sync is a **user-triggered server action**. No jobs or cron for sync.
+2. T2 skipped, as above.
+3. Daily re-sync becomes **sync on open** when the last sync was more than 24 hours ago.
+4. Owner-billed AI, so reviewers without credits can use demo mode.
+5. Design additions:
+   - Rate limit of one sync per user per 10 minutes, so nobody can burn the owner's AI credits.
+   - At most 50 messages per sync.
+   - Records are written after each AI batch, so cards appear live; the UI shows a syncing state.
+- CLAUDE.md core path and ARCHITECTURE.md (new Sync section) updated to match.
+
+**Cleanup:** the spike action and spec were deleted, and the spike branch (no commits) was deleted. The test account was kept for feature 3's two-user test. Its password is only in `~/.deepspace/test-accounts.json`, outside the repo.
+
+**Issues noticed (not fixed):**
+- **Dev server exit.** The first `dev start` after adding the `ai` import printed `Dev server exited with code 1`, but Vite kept running on port 5173, so the next `dev start` hit `port_in_use`. Cleaned up with `dev kill --port 5173`.
+- **CLI login token.** It's accepted as a bearer token by local dev but rejected by the live app (401).
+- **Unexplained spend.** Account-wide `app usage` jumped by about 2.58 credits between T3 and T3b. This app's itemized usage shows only about $0.026 of Gmail and about $0.00001 of AI. `app usage` covers all apps on the account, so the source is unknown. **The user should check it.**

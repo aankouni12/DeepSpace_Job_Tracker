@@ -18,13 +18,13 @@ DeepSpace SDK on Cloudflare Workers. Vite + React frontend, Hono worker, Tailwin
 
 Core path (must work end to end)
 User signs in (platform auth)
-User connects Gmail (platform Google OAuth, google/gmail-list)
-Background job fetches recent emails and classifies them with AI in batches
-Results are written as records: one application per company/role, with an email timeline
-Pipeline board (Applied, Interview, Offer, Rejected) updates in real time
-Scheduled job re-syncs daily
+User connects Gmail (platform Google OAuth, read-only; google/gmail-inbox)
+User-triggered sync (server action, no jobs or cron) fetches up to 50 recent emails as the user and classifies them with owner-billed AI in batches; rate-limited to one sync per user per 10 minutes
+Results are written as records after each batch: one application per company/role, with an email timeline
+Pipeline board (Applied, Interview, Offer, Rejected) updates in real time, with a syncing state during sync
+Sync on open: the board triggers sync when the last sync was more than 24 hours ago
 AI assistant with tool use over the user's records
-Demo mode with seeded sample emails so reviewers can try it without Gmail
+Demo mode with seeded sample emails, run through the same sync action, so reviewers can try it without Gmail
 Out of scope (do not build unless I ask)
 Sending email (gmail-send)
 Collaboration, messaging, multiplayer features

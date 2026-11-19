@@ -83,8 +83,8 @@ Middleware on every request wakes the cron room so schedules arm without waiting
 | Class | Binding | Role |
 |---|---|---|
 | `AppRecordRoom` | `RECORD_ROOMS` | The database: collections from `schemas.ts`, RBAC enforced per record, live sync over WebSocket |
-| `AppCronRoom` | `CRON_ROOMS` | Runs `src/cron.ts` tasks on an alarm |
-| `AppJobRoom` | `JOB_ROOMS` | Durable background jobs (`src/jobs.ts`); only members and admins may enqueue |
+| `AppCronRoom` | `CRON_ROOMS` | Runs `src/cron.ts` tasks on an alarm. Unused: sync is on open, not scheduled |
+| `AppJobRoom` | `JOB_ROOMS` | Durable background jobs (`src/jobs.ts`). Unused: its queue is visible to all members (see Sync) |
 | `AppYjsRoom`, `AppCanvasRoom`, `AppPresenceRoom` | `YJS_ROOMS`, `CANVAS_ROOMS`, `PRESENCE_ROOMS` | Collaborative editing, canvas and presence. Not used by this app |
 
 The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOPE_ID`). It is keyed to the id, not the name, so a rename keeps the data.
@@ -128,7 +128,7 @@ The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOP
 `uniqueOn: ['userId', 'gmailMessageId']`
 
 **Ownership rules:**
-- Rows are created only by server code (the sync job). By default, `'own'` checks the row's creator, which would be the job, so both collections set `ownerField: 'userId'`.
+- Rows are created only by server code (the sync action). By default, `'own'` checks the row's creator, which would be server code, so both collections set `ownerField: 'userId'`.
 - `userId` is deliberately **not** `userBound`. With `create: false` for every client role, `userBound` would stamp the writer's ID over the intended owner (docs: concepts/permissions).
 - Admin is also `'own'`, so the app owner does not see other users' applications.
 - `'*'` (signed out) and `viewer` are closed.
@@ -154,13 +154,26 @@ The browser never talks to the database directly; the WebSocket in step 3 is the
 
 `POST /api/actions/:name` with a bearer JWT goes through `resolveAuth` to the handler in `src/actions/`. Actions reach records with **RBAC off**, so each action must check ownership itself.
 
-### Integrations (*planned*: Gmail)
+### Gmail connection
 
-The frontend calls `/api/integrations/google/gmail-list`, and the worker forwards it with the user's JWT. Google is `user`-billed, so each user connects their own Gmail. An unconnected user gets `data.requiresOAuth` and an `authUrl`.
+Google is `user`-billed: each user connects their own Gmail, and each call bills that user ($0.013). The connection is read-only. `GET /api/integrations/status` reports `gmailRead: true`, `gmailModify: false`, `gmailSend: false`. An unconnected user gets `data.requiresOAuth` and an `authUrl`.
 
-### Background work (*planned*)
+### Sync (*planned*: a server action, no jobs or cron)
 
-`src/cron.ts` holds a daily task that enqueues jobs. `src/jobs.ts` runs in `AppJobRoom`: it fetches email, classifies it with AI in batches, and writes records. Cron runs as the app owner, so per-user scoping must be explicit.
+The spike on 2026-11-18 showed that a background job **cannot** read a user's Gmail through any documented path:
+- A job knows only `enqueuedBy`, a user ID. It has no JWT for that user.
+- Google tokens are stored per JWT subject, and the only server credential, `APP_OWNER_JWT`, would read the owner's mailbox.
+
+So sync runs inside the user's own request:
+
+1. **Trigger:** the client calls `POST /api/actions/sync` with the user's JWT, either from a "Sync now" button or automatically when the board opens and the last sync is more than 24 hours old (*sync on open*). Demo mode calls the same action with `source: 'demo'` and skips the Gmail fetch.
+2. **Rate limit:** one sync per user per 10 minutes. Exactly where the last-sync time is stored is settled in the sync feature's plan.
+3. **Fetch:** one `google/gmail-inbox` call (`format: 'metadata'`, at most 50 messages) with the caller's JWT. Each message has `id`, `snippet` (about 200 characters), `internalDate` (epoch milliseconds) and `payload.headers` (`From`, `Subject`, `Date`). There's no body, which also limits how much untrusted text reaches the AI.
+4. **Skip known messages:** drop IDs already in `emails` for this user, before any AI call.
+5. **Classify** the rest in small batches with `createDeepSpaceAI` and **no `authToken`**, so the app owner pays. This was verified with a zero-credit, non-owner test account. Reviewers without credits can therefore run demo mode. The AI returns labels only; our code validates them.
+6. **Write after each batch:** `applications` and `emails` rows with `userId = auth.userId`, so cards appear live while sync runs. The UI shows a syncing state until the action returns.
+
+**Why not `AppJobRoom`:** job rows live in one app-wide queue (`app:<APP_ID>`). Every member can watch it, and each update sends the whole job (`payload`, `result`, `progressMessage`) to every watcher (deepspace 0.44.2 `dist/worker.js`: 4814, 5226–5240, 5374). Email content in a job would leak to other users. `AppJobRoom` and `AppCronRoom` stay in the scaffold but are unused.
 
 ### AI assistant (*planned*)
 
