@@ -33,12 +33,14 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
     await status.getByText('Synced recently').isVisible().catch(() => false),
     'Board Reviewer is rate-limited from a run less than 10 minutes ago.',
   )
-  await expect(page.getByTestId('application-card')).toHaveCount(3, { timeout: 90_000 })
+  await expect(page.getByTestId('application-card')).toHaveCount(5, { timeout: 120_000 })
   await expect(page.getByTestId('lane-offer').getByText('Northwind Robotics', { exact: true })).toBeVisible()
   // The card shows the company as the first email wrote it ("Cedar Labs Inc.").
   await expect(page.getByTestId('lane-interview').getByText(/^Cedar Labs( Inc\.)?$/)).toBeVisible()
   await expect(page.getByTestId('lane-rejected').getByText('Bluefin Analytics', { exact: true })).toBeVisible()
-  await expect(page.getByTestId('lane-applied').getByTestId('application-card')).toHaveCount(0)
+  await expect(page.getByTestId('lane-applied').getByText('Kestrel Systems', { exact: true })).toBeVisible() // take-home = Applied
+  await expect(page.getByTestId('lane-rejected').getByText('Maple Ridge Software', { exact: true })).toBeVisible() // rejection in paragraph 2
+  await expect(page.getByTestId('lane-applied').getByTestId('application-card')).toHaveCount(1)
   await expect(page.getByText('Acme')).toHaveCount(0) // demo-9 injection created nothing
   await page.screenshot({ path: testInfo.outputPath('board.png'), fullPage: true })
 
@@ -64,7 +66,7 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
   await page.goto('/settings')
   await page.getByRole('button', { name: 'Delete my synced data' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete my synced data' }).click()
-  await expect(page.getByTestId('delete-result')).toHaveText('Deleted 3 applications and 10 emails.')
+  await expect(page.getByTestId('delete-result')).toHaveText('Deleted 5 applications and 12 emails.')
   await page.goto('/board')
   await expect(page.getByTestId('first-run')).toBeVisible({ timeout: 20_000 })
 

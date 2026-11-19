@@ -358,3 +358,54 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - Screenshots of the first-run screen, the board and the timeline were reviewed by the agent.
 
 **Polish for later (user request):** self-host the IBM Plex Sans font instead of loading it from Google Fonts. The security review flagged the third-party request as a privacy and dependency note, not a vulnerability.
+
+---
+
+## 2026-11-18: Feature 5, classification accuracy (`feature/accuracy`)
+
+**User spot-check of the live board (46 cards):**
+- **Interview column:** DeepSpace was wrong (a take-home build task). UWM was right at the time but later rejected, and the card still said Interview. Stellantis was a screening interview with an AI agent.
+- **Rejected column:** all 10 correct.
+- **Missed rejections, root cause confirmed by the user on Oracle:** the rejection is in paragraph 2, past the ~200-character snippet, under a "Thank you for your application" subject. Some Siemens rejections are likely the same.
+- **Split cards:** UWM / United Wholesale Mortgage (name and role variants); SICK (a "(JOB ID: 38201)" suffix); Oracle (requisition ID OVIP-334345). Rolls-Royce's 2 cards are correctly separate.
+
+**Agent investigation** (paged through all records; counts and company names only):
+- UWM was **6 cards**, not 4.
+- **The rejection had been fetched and classified correctly** (Oct 26). It was attached to a sixth role variant, "Internship", which was already in the Rejected column. So the cause was the split, not the fetch or the classification.
+- All UWM emails were on UWM cards, and the 100-message window covered Oct 5 to Nov 18.
+- DeepSpace: 1 card, Interview, 2 emails. Stellantis: 1, Interview, 3. Oracle: 1, Applied, 1. Siemens: 4, all Applied. SICK: 2, both Rejected.
+- A one-message `format: 'full'` check (structure only) confirmed the body arrives in the same `gmail-inbox` call at the same price (base64url `text/html`, about 3.6 KB).
+
+**Asked (approved with option (a)):** classify from the body; a prompt that judges the outcome anywhere in the text; existing names passed into each batch; role ID stripping; "Unspecified role" attachment; status never moving backward; the new interview definition; rejection phrases in the query; a demo email modeled on Oracle with a test. **Option (a):** one batch at a time, for first-sync accuracy.
+
+**Built (`sync.ts`):**
+- `format: 'full'`, plus `extractText`: base64url decoding, text/plain preferred, otherwise stripped HTML; quoted replies dropped; capped at 1,500 characters.
+- The new prompt: outcome anywhere in the text; interview only for a scheduled conversation with a person; take-home, coding challenge, online assessment and **AI-agent screening** count as applied; rejection phrasings listed.
+- `existingApplications` (up to 150) passed to every batch. The output gains `companyAsWritten`:
+  - the grounding check uses the name as written, against from, subject, snippet and body;
+  - the returned `company` is accepted only if it's the same name or one of the user's existing companies.
+- `resolveCompany` (normalized name or initials, e.g. UWM ↔ United Wholesale Mortgage).
+- `cleanRole`: drops parentheticals, Job ID/Req/Ref values and requisition tokens; years stay.
+- `findApp`:
+  - "Unspecified role" goes to the company's single application;
+  - a named role fills in a single "Unspecified role" application.
+- `nextStatus`: only moves forward; rejected wins over applied or interview, and over offer only if newer; a rejected card is never moved by sync.
+- Batches run one at a time; the Gmail query gained 6 rejection phrases.
+- `demo-emails.ts`: demo-11 (Kestrel Systems take-home, expected **applied**) and demo-12 (Maple Ridge Software, polite opener, rejection only in paragraph 2 of the body, expected **rejected**). The demo is now 12 emails and 5 applications.
+- Specs updated to match.
+
+**Interpretation flagged to the user:** Stellantis was "a screening interview with an AI agent". Under the user's rule ("a scheduled conversation with a person"), it's labeled **applied**. That's a one-line prompt change if they'd rather count it as an interview.
+
+**Privacy tradeoff (user-requested note):** **email bodies are now sent to the AI provider** (Anthropic, through the DeepSpace proxy) for classification. Each body is cleaned and capped at 1,500 characters, used only for that call, and **never stored**: `emails` still keeps only `from`, `subject` and `snippet`. Before this change, only the snippet (~200 characters) left Gmail for the AI.
+
+**Verified:**
+- `tsc` and `eslint` clean.
+- vitest **63/63**. New tests:
+  - `extractText` (plain text plus quoted-reply cut, HTML and entities, the cap);
+  - `cleanRole` (JOB ID, OVIP-334345, Req ID, years kept);
+  - `resolveCompany` (initials both ways, under 3 letters ignored);
+  - a table of `nextStatus` cases;
+  - grounding with existing names (canonical accepted, an invented canonical falls back, an ungrounded name is rejected, a company found only in the body passes);
+  - fake-tools action tests: **UWM variants merge into one card that ends Rejected**; the Oracle-style body is classified and **never stored**, and its role is cleaned; existing names reach the next batch.
+- Full Playwright suite on fresh local data **13/13**. The real-model demo sync returned `classified 12, failedBatches 0, created 5, updated 3`, with labels applied 4, interview 2, rejected 2, offer 1, not_job_related 3, and **0 rejections**: demo-12 → rejected, demo-11 → applied, demo-9 still created nothing.
+- **Measured:** a demo sync now costs **about $0.0012** in owner AI (2 batches: $0.00097 + $0.00025), up from $0.0006.

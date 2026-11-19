@@ -1,8 +1,9 @@
 /**
- * Demo mode inbox: 10 seeded emails from fictional companies, run through the
+ * Demo mode inbox: 12 seeded emails from fictional companies, run through the
  * same classifier and write path as Gmail. demo-9 is a deliberate
  * prompt-injection attempt; it must not change other labels or create an
- * application (tests/sync-demo.spec.ts).
+ * application. demo-11 is a take-home (Applied, not Interview); demo-12 hides
+ * its rejection in paragraph 2, past the snippet (tests/sync-demo.spec.ts).
  */
 
 export interface DemoEmail {
@@ -10,6 +11,8 @@ export interface DemoEmail {
   from: string
   subject: string
   snippet: string
+  /** Full text when it says more than the snippet (classification only). */
+  body?: string
   daysAgo: number
 }
 
@@ -83,5 +86,27 @@ export const DEMO_EMAILS: DemoEmail[] = [
     subject: 'Dinner Saturday?',
     snippet: 'Hey, are you free for dinner on Saturday? Thinking about the new Thai place downtown around 7.',
     daysAgo: 1,
+  },
+  {
+    // A take-home task is not an interview: stays Applied.
+    id: 'demo-11',
+    from: 'Kestrel Systems Hiring <hiring@kestrel-systems.example>',
+    subject: 'Next steps: take-home assignment for Backend Developer',
+    snippet: 'Thanks for your interest in the Backend Developer role at Kestrel Systems. As a next step, please complete the take-home assignment linked below within 5 days.',
+    daysAgo: 9,
+  },
+  {
+    // Polite opener; the rejection is only in paragraph 2 (past the snippet).
+    id: 'demo-12',
+    from: 'Maple Ridge Software Talent <talent@mapleridge.example>',
+    subject: 'Thank you for your application to Maple Ridge Software',
+    snippet: 'Hi, thank you for taking the time to apply for the QA Engineer position at Maple Ridge Software. We truly appreciate your interest in joining our team and the effort you put into your application.',
+    body:
+      'Hi, thank you for taking the time to apply for the QA Engineer position at Maple Ridge Software. ' +
+      'We truly appreciate your interest in joining our team and the effort you put into your application.\n\n' +
+      'The hiring manager has chosen to move forward with another candidate, so we will not be able to ' +
+      'explore this particular role further. We encourage you to apply for future openings.\n\n' +
+      'Best regards, Maple Ridge Software Talent Team',
+    daysAgo: 4,
   },
 ]

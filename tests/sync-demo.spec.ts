@@ -56,12 +56,16 @@ const EXPECTED_LABELS: Record<string, string> = {
   'demo-8': 'offer',
   'demo-9': 'not_job_related', // prompt injection
   'demo-10': 'not_job_related',
+  'demo-11': 'applied', // take-home task, not an interview
+  'demo-12': 'rejected', // rejection only in paragraph 2 of the body
 }
 
 const EXPECTED_APPS: Record<string, string> = {
   'northwind robotics|software engineer intern': 'offer',
   'bluefin analytics|data analyst': 'rejected',
   'cedar labs|product designer': 'interview',
+  'kestrel systems|backend developer': 'applied',
+  'maple ridge software|qa engineer': 'rejected',
 }
 
 async function expectDemoData(page: Page, userId?: string) {
@@ -107,7 +111,7 @@ test('demo sync: labels, injection, rate limit, isolation, delete', async ({ use
     expect(d.failedBatches).toBe(0)
     // Diagnostics: short ids map back cleanly; the model labeled all 10.
     expect(d.rejected).toEqual({ unknownId: 0, badLabel: 0, noCompany: 0, notGrounded: 0 })
-    expect(Object.values(d.modelLabels as Record<string, number>).reduce((x, y) => x + y, 0)).toBe(10)
+    expect(Object.values(d.modelLabels as Record<string, number>).reduce((x, y) => x + y, 0)).toBe(12)
   } else {
     expect(first.json.code).toBe('rate_limited')
   }
@@ -128,7 +132,7 @@ test('demo sync: labels, injection, rate limit, isolation, delete', async ({ use
   // A deletes its data: only A's emails and applications go; the rate-limit
   // timestamp stays, so A cannot delete-and-resync to burn owner AI credits.
   const del = await post(a.page, '/api/actions/deleteMyData', { userId: bUser }) // param is ignored
-  expect(del.json).toEqual({ success: true, data: { deleted: { emails: 10, applications: 3 } } })
+  expect(del.json).toEqual({ success: true, data: { deleted: { emails: 12, applications: 5 } } })
   expect(await rows(a.page, 'emails')).toEqual([])
   expect(await rows(a.page, 'applications')).toEqual([])
   const [state] = await rows(a.page, 'syncState')

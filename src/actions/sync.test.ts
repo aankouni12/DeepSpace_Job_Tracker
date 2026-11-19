@@ -4,11 +4,15 @@ import type { Env } from '../../worker'
 import {
   buildGmailQuery,
   classifyAndWrite,
+  cleanRole,
   deleteMyData,
   emptyStats,
+  extractText,
+  nextStatus,
   normalizeKey,
   parseGmailMessage,
   remapIds,
+  resolveCompany,
   sync,
   validateBatch,
   type Classified,
@@ -71,6 +75,7 @@ describe('parseGmailMessage', () => {
       subject: 'Application received',
       snippet: 'Thanks for applying',
       receivedAt: new Date(1795048599000).toISOString(),
+      body: '', // metadata format has no body parts
     })
   })
 
@@ -260,9 +265,27 @@ describe('classifyAndWrite', () => {
         await new Promise((r) => setTimeout(r, 5))
         inFlight--
       },
+      emptyStats(),
+      undefined,
+      4,
     )
     expect(maxClassifying).toBeGreaterThan(1)
     expect(maxInFlight).toBe(1)
+  })
+
+  it('by default classifies one batch at a time, each after the previous batch is written', async () => {
+    const order: string[] = []
+    await classifyAndWrite(
+      emails,
+      async (batch) => {
+        order.push(`classify ${batch[0].id}`)
+        return allApplied(batch)
+      },
+      async (batch) => {
+        order.push(`write ${batch[0].id}`)
+      },
+    )
+    expect(order).toEqual(['classify m24', 'write m24', 'classify m14', 'write m14', 'classify m4', 'write m4'])
   })
 })
 
@@ -332,10 +355,11 @@ const gmailMessage = (id: string, company: string, ms: number) => ({
 function modelLabelsAllApplied() {
   generateObject.mockImplementation(async ({ prompt }: { prompt: string }) => ({
     object: {
-      results: (JSON.parse(prompt) as Array<{ id: string; from: string }>).map((e) => ({
+      results: (JSON.parse(prompt).emails as Array<{ id: string; from: string }>).map((e) => ({
         id: e.id,
         label: 'applied',
         company: e.from.split(' <')[0],
+        companyAsWritten: e.from.split(' <')[0],
         role: 'Engineer',
       })),
     },
@@ -415,6 +439,202 @@ describe('deleteMyData action (fake tools)', () => {
     expect([...db.applications.keys()]).toEqual(['a-bob'])
     expect(db.syncState.get('alice')?.data).toEqual({ userId: 'alice', lastSyncAt: 'T', cursorAt: null })
     expect(db.syncState.get('bob')?.data.cursorAt).toBe('C')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Accuracy: bodies, names, status rules
+// ---------------------------------------------------------------------------
+
+const b64url = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+
+describe('extractText', () => {
+  it('prefers text/plain and drops quoted replies', () => {
+    const text = 'Thanks for applying.\n\nWe chose another candidate.\n\nOn Mon, Nov 17, 2026 at 9:00 AM Jo <jo@x.example> wrote:\n> my old message'
+    const payload = {
+      mimeType: 'multipart/alternative',
+      parts: [
+        { mimeType: 'text/plain', body: { data: b64url(text) } },
+        { mimeType: 'text/html', body: { data: b64url('<p>ignored</p>') } },
+      ],
+    }
+    expect(extractText(payload)).toBe('Thanks for applying. We chose another candidate.')
+  })
+
+  it('strips HTML, styles and entities when there is no plain part', () => {
+    const html = '<html><head><style>p{color:red}</style></head><body><p>Thank you&nbsp;&amp; welcome.</p><p>Paragraph&#39;s two</p></body></html>'
+    expect(extractText({ mimeType: 'text/html', body: { data: b64url(html) } })).toBe("Thank you & welcome. Paragraph's two")
+  })
+
+  it('caps the text', () => {
+    const long = 'word '.repeat(1000)
+    expect(extractText({ mimeType: 'text/plain', body: { data: b64url(long) } }).length).toBe(1500)
+  })
+})
+
+describe('cleanRole and keys', () => {
+  it('drops job IDs, requisition IDs and trailing parentheticals', () => {
+    expect(cleanRole('Software Engineer Intern (JOB ID: 38201)')).toBe('Software Engineer Intern')
+    expect(cleanRole('Software Engineer - OVIP-334345')).toBe('Software Engineer')
+    expect(cleanRole('Data Analyst, Req ID 7781')).toBe('Data Analyst')
+    expect(cleanRole('2027 Technology Summer Internship')).toBe('2027 Technology Summer Internship') // years stay
+    expect(cleanRole('(JOB ID: 1)')).toBe('Unspecified role')
+    expect(normalizeKey('SICK', 'Engineer (JOB ID: 38201)')).toBe(normalizeKey('SICK AG Inc.'.replace(' AG', ''), 'Engineer'))
+  })
+})
+
+describe('resolveCompany', () => {
+  const known = new Map([['united wholesale mortgage', 'United Wholesale Mortgage']])
+  it('maps initials onto an existing company, both ways', () => {
+    expect(resolveCompany('UWM', known)).toEqual({ norm: 'united wholesale mortgage', display: 'United Wholesale Mortgage' })
+    const acronymKnown = new Map([['uwm', 'UWM']])
+    expect(resolveCompany('United Wholesale Mortgage', acronymKnown)).toEqual({ norm: 'uwm', display: 'UWM' })
+  })
+  it('leaves unrelated names alone', () => {
+    expect(resolveCompany('Oracle', known)).toEqual({ norm: 'oracle', display: 'Oracle' })
+    expect(resolveCompany('UW', known).norm).toBe('uw') // under 3 letters: no initials match
+  })
+})
+
+describe('nextStatus', () => {
+  const at = (d: number) => new Date(Date.UTC(2026, 10, d)).toISOString()
+  it.each([
+    ['applied', 'interview', 'interview'],
+    ['interview', 'applied', 'interview'], // never backward
+    ['offer', 'interview', 'offer'],
+    ['interview', 'offer', 'offer'],
+    ['applied', 'rejected', 'rejected'],
+    ['interview', 'rejected', 'rejected'], // a later rejection always wins over interview
+    ['rejected', 'interview', 'rejected'], // sync never moves a rejected card
+    ['rejected', 'offer', 'rejected'],
+  ])('%s + %s -> %s', (current, incoming, expected) => {
+    expect(nextStatus(current, incoming, at(10), at(5))).toBe(expected)
+  })
+  it('a rejection older than an offer does not undo the offer; a newer one does', () => {
+    expect(nextStatus('offer', 'rejected', at(3), at(5))).toBe('offer')
+    expect(nextStatus('offer', 'rejected', at(9), at(5))).toBe('rejected')
+  })
+})
+
+describe('validateBatch with existing names', () => {
+  const uwm = { ...email('u', 'x', 1), from: 'UWM Recruiting <jobs@uwm.example>', subject: 'Interview', snippet: '' }
+  it('accepts an existing canonical name when the email names the company another way', () => {
+    const out = validateBatch(
+      [uwm],
+      { results: [{ id: 'u', label: 'interview', company: 'United Wholesale Mortgage', companyAsWritten: 'UWM', role: '' }] },
+      emptyStats(),
+      new Set(['united wholesale mortgage']),
+    )!
+    expect(out.get('u')).toMatchObject({ label: 'interview', company: 'United Wholesale Mortgage' })
+  })
+
+  it('falls back to the written name when the canonical one is not an existing company', () => {
+    const out = validateBatch(
+      [uwm],
+      { results: [{ id: 'u', label: 'interview', company: 'Acme', companyAsWritten: 'UWM', role: '' }] },
+      emptyStats(),
+      new Set(['united wholesale mortgage']),
+    )!
+    expect(out.get('u')?.company).toBe('UWM')
+  })
+
+  it('rejects a written name the email does not contain, even if it is an existing company', () => {
+    const stats = emptyStats()
+    const out = validateBatch(
+      [uwm],
+      { results: [{ id: 'u', label: 'offer', company: 'Oracle', companyAsWritten: 'Oracle', role: '' }] },
+      stats,
+      new Set(['oracle']),
+    )!
+    expect(out.get('u')?.label).toBe('not_job_related')
+    expect(stats.rejected.notGrounded).toBe(1)
+  })
+
+  it('grounds the company in the body, not only the snippet', () => {
+    const e = { ...email('b', 'x', 1), from: 'Talent <t@ats.example>', subject: 'Update', snippet: 'Thanks', body: 'Thanks. Maple Ridge Software chose another candidate.' }
+    const out = validateBatch([e], {
+      results: [{ id: 'b', label: 'rejected', company: 'Maple Ridge Software', companyAsWritten: 'Maple Ridge Software', role: 'QA' }],
+    })!
+    expect(out.get('b')?.label).toBe('rejected')
+  })
+})
+
+describe('sync action: names, roles and bodies (fake tools)', () => {
+  beforeEach(() => {
+    generateObject.mockReset()
+  })
+
+  // Model stub driven by a per-subject script: subject -> [label, company, written, role].
+  function scriptModel(script: Record<string, [string, string, string, string]>) {
+    const prompts: Array<{ existingApplications: unknown[]; emails: Array<{ text: string }> }> = []
+    generateObject.mockImplementation(async ({ prompt }: { prompt: string }) => {
+      const p = JSON.parse(prompt)
+      prompts.push(p)
+      return {
+        object: {
+          results: p.emails.map((e: { id: string; subject: string }) => {
+            const [label, company, companyAsWritten, role] = script[e.subject]
+            return { id: e.id, label, company, companyAsWritten, role }
+          }),
+        },
+      }
+    })
+    return prompts
+  }
+
+  const msg = (id: string, from: string, subject: string, day: number, body = '') => ({
+    id,
+    snippet: subject,
+    internalDate: String(Date.UTC(2026, 9, day)),
+    payload: {
+      mimeType: 'text/plain',
+      headers: [{ name: 'From', value: from }, { name: 'Subject', value: subject }],
+      body: body ? { data: b64url(body) } : {},
+    },
+  })
+
+  it('merges UWM variants into one application, and a later rejection wins', async () => {
+    const prompts = scriptModel({
+      'Interview 1': ['interview', 'UWM', 'UWM', ''],
+      'Interview 2': ['interview', 'United Wholesale Mortgage', 'United Wholesale Mortgage', '2027 Technology'],
+      Decision: ['rejected', 'United Wholesale Mortgage', 'United Wholesale Mortgage', '2027 Technology'],
+    })
+    const { db, tools } = fakeTools([
+      {
+        messages: [
+          msg('a', 'UWM <jobs@uwm.example>', 'Interview 1', 15),
+          msg('b', 'United Wholesale Mortgage <jobs@uwm.example>', 'Interview 2', 21),
+          msg('c', 'United Wholesale Mortgage <jobs@uwm.example>', 'Decision', 26),
+        ],
+      },
+    ])
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    const apps = [...db.applications.values()]
+    expect(apps).toHaveLength(1)
+    expect(apps[0].data).toMatchObject({ company: 'UWM', role: '2027 Technology', status: 'rejected' })
+    expect(prompts).toHaveLength(1)
+  })
+
+  it('sends the cleaned body (not the snippet) and never stores it', async () => {
+    const prompts = scriptModel({ 'Thank you for your application to Oracle': ['rejected', 'Oracle', 'Oracle', 'Engineer (JOB ID: 9912)'] })
+    const body = 'Thank you for applying.\n\nThe hiring manager has chosen to move forward with another candidate.'
+    const { db, tools } = fakeTools([{ messages: [msg('o', 'Oracle <x@oracle.example>', 'Thank you for your application to Oracle', 18, body)] }])
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    expect(prompts[0].emails[0].text).toContain('another candidate')
+    const [app] = [...db.applications.values()]
+    expect(app.data).toMatchObject({ status: 'rejected', role: 'Engineer', key: 'oracle|engineer' })
+    const [row] = [...db.emails.values()]
+    expect(Object.values(row.data).join(' ')).not.toContain('another candidate')
+  })
+
+  it('passes existing applications into the next batch', async () => {
+    const prompts = scriptModel({ s: ['applied', 'Acme', 'Acme', 'Engineer'] })
+    const msgs = Array.from({ length: 11 }, (_, i) => msg(`m${i}`, 'Acme <x@acme.example>', 's', i + 1))
+    const { tools } = fakeTools([{ messages: msgs }])
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    expect(prompts).toHaveLength(2)
+    expect(prompts[0].existingApplications).toEqual([])
+    expect(prompts[1].existingApplications).toEqual([{ company: 'Acme', role: 'Engineer' }])
   })
 })
 
