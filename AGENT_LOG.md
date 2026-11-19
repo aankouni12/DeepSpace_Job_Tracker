@@ -4,6 +4,33 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 ---
 
+## Next session (updated 2026-11-19)
+
+**Done (live at https://applytrack.app.space, release 6, `main` @ `fc77fac`):**
+- Platform sign-in; read-only Gmail connection (`gmailRead` only).
+- Data model with per-user permissions: `applications`, `emails`, `syncState`.
+- `sync` server action (Gmail and demo): user-tuned Gmail query, paging, cursor, up to 100 emails, one AI batch at a time, classification from the email body, company/role merging, status that only moves forward, 10-minute rate limit, owner-billed AI.
+- `deleteMyData` action, with a button in Settings.
+- Pipeline board: first-run screen, live lanes, status dropdown, email timeline, Sync / Connect / Load demo, sync on open after 24 hours.
+- Tests: 64 unit, 13 Playwright.
+
+**Left before Saturday 2026-11-21, 11:59 PM ET:**
+1. **AI assistant:** `npx deepspace add ai-chat`. Trim `src/ai/tools.ts` to reads, plus status changes only. Every write needs the user's confirmation in the UI, so email text in the model's context can't change records on its own.
+2. **Self-host IBM Plex Sans** (drop the Google Fonts link).
+3. **Final tests:** full suite on fresh data, plus a manual real-Gmail pass on the live app.
+4. **Writeup:** include the privacy tradeoff (bodies go to the AI provider, capped, not stored) and the limitations below.
+
+**Open risks and known limitations:**
+- Outbound calls per request: a 100-email sync is about 175 calls and took about 76 s. Both work, but the platform limits aren't documented, so the cap stays at 100.
+- A first sync reaches only the newest 100 matching emails, about a month here. More than 100 new matches between syncs means the oldest are missed.
+- Rate-limit race: two requests in the same instant can both pass (accepted on purpose; bounded cost).
+- An email that never names its company is recorded as `not_job_related` and not retried.
+- Card count is 37 against the user's expected 29–35; there may still be some role splits (not checked by name).
+- Interview definition: AI-agent screenings count as Applied (Stellantis). That's a one-line prompt change if the user wants otherwise.
+- Owner AI cost: about $0.0012 per demo sync, and an estimated $0.015–0.02 per 100-email Gmail sync. Limited by the rate limit only, not per account.
+
+---
+
 ## 2026-11-17: Project moved out of OneDrive
 
 **Asked:** Set up the DeepSpace project. It was first created at `C:\Users\aanko\OneDrive\Desktop\deepspace-job-tracker`.
@@ -409,3 +436,32 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
   - fake-tools action tests: **UWM variants merge into one card that ends Rejected**; the Oracle-style body is classified and **never stored**, and its role is cleaned; existing names reach the next batch.
 - Full Playwright suite on fresh local data **13/13**. The real-model demo sync returned `classified 12, failedBatches 0, created 5, updated 3`, with labels applied 4, interview 2, rejected 2, offer 1, not_job_related 3, and **0 rejections**: demo-12 → rejected, demo-11 → applied, demo-9 still created nothing.
 - **Measured:** a demo sync now costs **about $0.0012** in owner AI (2 batches: $0.00097 + $0.00025), up from $0.0006.
+- Before merging, the user asked whether filling in the role on an "Unspecified role" card could create a duplicate card later (the key stays `company|unspecified role`). Answer: no. `findApp` also matches by the card's current role. A unit test now covers this in the same sync and in a later one (`fc77fac`, 64/64). Merged and deployed as release 6.
+
+**User re-sync on the live app** (delete, then Gmail sync on release 6; the agent counted the results, counts and company names only):
+
+| | Before (release 5) | After (release 6) |
+|---|---|---|
+| Cards | 46 | **37** (27 distinct companies) |
+| UWM | 6 cards, 4 showing Interview | **1 card, Rejected**, all 8 emails on it |
+| DeepSpace | Interview | **Applied** |
+| Oracle | Applied | **Rejected** |
+| Siemens | 4 cards, all Applied | **3 cards: 1 Rejected, 2 Applied** |
+| Stellantis | Interview | **Applied** (AI-agent screen, by the user's rule) |
+| SICK | 2 cards | **1 card**, Rejected |
+| Interview column | 6 | 0 |
+
+- Emails: 100 (applied 43, interview 5, rejected 13, not_job_related 39). Applications: applied 25, rejected 12.
+- **Duration:** about 76 s server-side (`lastSyncAt` 02:19:24 → cursor write 02:20:40 UTC), with no timeout. The cursor advanced, so there were 0 failed batches. The 100-email cap stays.
+
+---
+
+## 2026-11-18: Day summary
+
+1. **Spike, then design change.** A background job (`AppJobRoom`) can't read a user's Gmail through any documented path: it has only `enqueuedBy`, with no user JWT. Its queue also sends job payloads to every member. Sync moved to a **user-triggered server action** with **sync on open** after 24 hours, replacing the planned daily cron. T3/T3b proved AI calls from an action bill the owner, even for a zero-credit caller.
+2. **First real sync returned 0 job emails.** That was correct: the newest 50 were promotions and alerts. **The fetch was the problem.** Fix: the user hand-tuned a Gmail query (application and rejection phrases, minus promotions and social), plus paging, a cursor and a cap of 100.
+3. **Board** shipped (first-run screen, live lanes, status dropdown, timeline, delete). The **user's spot-check** found: UWM split into **6 cards**, with the rejection on a sixth role variant; Oracle's rejection **hidden past the ~200-character snippet**, in paragraph 2; **DeepSpace mislabeled** as Interview (it was a take-home); split cards from job IDs (SICK, Oracle).
+4. **Accuracy fixes:** classification from the body, existing names passed to each batch, initials matching, role ID cleanup, "Unspecified role" attachment, status that only moves forward, a stricter interview definition, rejection phrases in the query. Result: **46 → 37 cards**, UWM 1 Rejected card, Oracle Rejected, DeepSpace Applied (table above).
+
+**Verified by the user:** T1 (Gmail consent and response format in the console); the first and second real syncs (result tables); that the first sync's 0 was correct (checked in Gmail); the board spot-check (column by column); the Oracle root cause (opened the email); and running the release-6 delete and re-sync.
+**Verified by the agent:** docs and SDK research and line citations; T3/T3b billing; all unit and Playwright runs (latest 64/64 and 13/13); `/security-review` on every branch; live checks after each deploy (401 when signed out, schema list, 0 schema-lint warnings, no secrets); and counts of the user's stored records, never content.

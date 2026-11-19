@@ -38,16 +38,16 @@ src/
     action-routes.ts       POST /api/actions/:name (server actions)
   actions/index.ts         Server action registry: { sync, deleteMyData }
   actions/sync.ts          sync (rate limit, fetch, classify, write) and deleteMyData (+ sync.test.ts)
-  actions/demo-emails.ts   10 fictional demo emails, one a prompt-injection attempt
+  actions/demo-emails.ts   12 fictional demo emails: one prompt-injection attempt, one take-home, one rejection hidden in paragraph 2
   ai/
     tools.ts               buildTools: AI tool definitions over records
     agent.ts               registerAgent: exposes tools over HTTP / MCP / browser
     chat-routes.ts         Chat endpoints (used only when an ai-chats schema exists)
-  cron.ts                  Scheduled tasks (empty)
-  jobs.ts                  Background job handler (empty)
+  cron.ts                  Scaffold file, empty and unused (no scheduled sync; see Sync)
+  jobs.ts                  Scaffold file, empty and unused (no background sync job; see Sync)
   integrations.ts          Integration billing: google and composio are 'user'-billed
 
-tests/                     Playwright: smoke.spec.ts, api.spec.ts (default run), collab.spec.ts
+tests/                     Playwright: smoke.spec.ts, api.spec.ts (default run), collab.spec.ts, sync-demo.spec.ts, board.spec.ts
 public/                    Static files (favicon, robots.txt, _headers)
 .agents/skills/deepspace/  DeepSpace agent skill (linked from .claude/skills/deepspace)
 ```
@@ -57,7 +57,7 @@ public/                    Static files (favicon, robots.txt, _headers)
 | Concern | Location |
 |---|---|
 | Frontend | `src/main.tsx`, `src/pages/`, `src/components/` |
-| Worker (backend) | `worker.ts` plus `src/server/`, `src/actions/`, `src/ai/`, `src/cron.ts`, `src/jobs.ts` |
+| Worker (backend) | `worker.ts` plus `src/server/`, `src/actions/`, `src/ai/` (`src/cron.ts` and `src/jobs.ts` exist but are unused) |
 | Schemas and permissions | `src/schemas.ts` and `src/schemas/*.ts`. Baked in at deploy time, so a schema change needs a redeploy |
 | Config | `wrangler.toml` (identity, bindings) and `src/integrations.ts` (billing) |
 | Secrets | `npx deepspace secrets` only. `.dev.vars` is generated and gitignored |
@@ -304,5 +304,5 @@ It **keeps `syncState.lastSyncAt`**, because deleting it would let a delete-then
 ## Build and deploy
 
 - Local: `npx deepspace dev start` runs Vite and the worker (miniflare) on http://localhost:5173.
-- Tests: `npx deepspace test run` (smoke and API); `test run all` includes collab.
+- Tests: `npx vitest run` from uppercase `C:\` (unit); `npx deepspace test run all --port 5180` (Playwright). Delete `.wrangler/state` first for a fresh run, or the rate-limited specs skip with a printed reason.
 - Deploy: from `main` after merging a feature branch. Run `git status` first, since deploys ship the working tree. Then `npx deepspace deploy`.
