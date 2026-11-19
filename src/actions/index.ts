@@ -1,5 +1,5 @@
 import type { ActionHandler } from 'deepspace/worker'
 import type { Env } from '../../worker'
-import { sync } from './sync'
+import { deleteMyData, sync } from './sync'
 
-export const actions: Record<string, ActionHandler<Env>> = { sync }
+export const actions: Record<string, ActionHandler<Env>> = { sync, deleteMyData }

@@ -240,3 +240,70 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
   - vitest **31/31** (sync 14, permissions 14, prerender 3).
   - `sync-demo.spec.ts` **1/1** on an emptied local database (`.wrangler/state` deleted, as the docs suggest): `classified 10, failedBatches 0, created 3, updated 4`.
   - Full Playwright suite **12/12**, including the sync spec's rerun on the rate-limited path.
+- Merged as `1e3a7ef` and deployed. Live checks:
+  - `syncState` is in the schema list.
+  - Creating a `syncState` row as the owner is refused (`CREATE DENIED: role=admin`).
+  - Unauthenticated `POST /api/actions/sync` returns 401.
+  - 0 schema-lint lines.
+
+---
+
+## 2026-11-18: Feature 3b, Gmail sync v2 (`feature/gmail-sync-v2`)
+
+**First real Gmail sync (user, live, v1 code):**
+- Result table: `fetched 50, skipped 0, classified 50, failedBatches 0, applicationsCreated 0, applicationsUpdated 0`.
+- The agent counted the stored rows (labels only, no content): 50 `emails`, all `not_job_related`; 0 applications.
+- The agent called 0 of 50 suspicious and suggested an over-aggressive prompt or garbled IDs.
+- **The user checked Gmail:** the newest 50 really were all today's promotions and job alerts. The classification was right, and **the problem was the fetch** (`newer_than:30d` with no filter).
+
+**Asked:**
+1. Use the user-tested Gmail query with `nextPageToken` paging. First sync up to 200 messages; later syncs only newer mail via `after:`.
+2. Run a few AI batches at once and keep writing after each batch.
+3. Prompt: job alerts, recommendations, newsletters, surveys and career-site account emails are `not_job_related`. Only responses to the user's own applications count.
+4. Log the snippet limitation, with full-body fetch as a next step. Don't build it.
+5. Add "delete my synced data", enforced on the server.
+- Keep the diagnostic counts as a check.
+- **Before building, reduce outbound calls:** load known IDs and applications once each; check the docs for a bulk write; report the estimate; if it's still high, cap the first sync at 100 and note the tradeoff.
+
+**Decisions:**
+- **Delete keeps `syncState.lastSyncAt`** (agent proposal, approved). Deleting it would let a delete-then-sync loop bypass the rate limit and burn owner AI credits. Delete clears only `cursorAt`.
+- **Separate `cursorAt`**, which advances only after a sync with 0 failed batches. Otherwise `after:` would permanently skip the emails of a failed batch.
+- **First-sync cap lowered to 100 (from 200).**
+  - The known IDs and applications were already loaded once each in v1, not per email.
+  - The docs and SDK have **no bulk create or write**: `tools/execute` takes one `{ tool, params }` per request, and only `deleteWhere` works in bulk.
+  - With status updates combined per application per batch, a 200-message sync is about 300–340 outbound calls; at 100 messages, about 170–210.
+  - The per-request limit isn't documented. The only data point is that a 50-message sync (about 60 calls) worked.
+  - **Tradeoff:** a first sync reaches only the newest 100 matching emails, about a month for this user. Older matches in the 60-day window are never fetched.
+
+**Built:**
+- `sync.ts`:
+  - `buildGmailQuery` (filter plus `newer_than:60d` or `after:<cursor − 1 day>`);
+  - Gmail paging, at most 100 per sync;
+  - short per-batch IDs plus `remapIds`;
+  - the rewritten prompt;
+  - `modelLabels` / `rejected` counts in every sync result;
+  - 4 classifications at a time, with batch writes run one at a time;
+  - at most one application update per application per batch;
+  - the cursor advancing only on clean Gmail syncs;
+  - `deleteMyData`.
+- `syncState.cursorAt` column.
+- `deleteMyData` registered in `actions/index.ts`.
+
+**Problem found and fixed (test-only):** four new action tests failed with `Cannot destructure property 'prompt' of undefined` and an escaped "model down" rejection.
+- Hypothesis: something called the model mock with no arguments.
+- Test: a probe showed `mockImplementation` doesn't call the function itself, and a stub that threw on `undefined` confirmed a real call after the test.
+- **Cause:** `beforeEach(() => generateObject.mockReset())` *returned* the mock, which vitest runs as a cleanup hook.
+- Fix: braces around the body. The probe file was deleted.
+
+**Verified:**
+- `tsc` and `eslint` clean.
+- vitest **40/40**: sync 23, permissions 14, prerender 3.
+- `sync-demo.spec.ts` **1/1** on an emptied local database:
+  - A's sync: `classified 10, failedBatches 0, created 3, updated 3` (one fewer update than v1, thanks to combining). `modelLabels` applied 3, interview 2, rejected 1, offer 1, not_job_related 3, and **0 rejections**.
+  - A's `deleteMyData` returned `{ emails: 10, applications: 3 }`. A then had 0 rows, still had `lastSyncAt`, had `cursorAt` cleared, and a re-sync was refused.
+  - B (also demo-synced) was untouched.
+- Full suite: **11 passed, 1 skipped.** The skip is the sync spec rerun less than 10 minutes after its own delete step, with the reason printed.
+- **Cost:** the demo sync with the new, longer prompt cost **$0.00061** (A) and **$0.00060** (B), up from $0.00045.
+- **Not tested here:** the real Gmail path, which is the user's manual test after deploy.
+
+**Known limitation (user-requested note):** snippets are about 200 characters and can cut off the meaning. "We have decided to move forward with…" could be good news or a rejection. **Next step, not built:** fetch the full body (`gmail-get`) only for ambiguous matches.

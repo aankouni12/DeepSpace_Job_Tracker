@@ -1,6 +1,6 @@
 /**
  * Sync state — one row per user (record id = userId), written only by the
- * sync action. Holds the rate-limit timestamp, so it must not be on `users`:
+ * sync actions. Holds the rate-limit timestamp, so it must not be on `users`:
  * members can update their own users row and would reset their own limit.
  * Users may read their own row (for "last synced"); nobody can write it.
  */
@@ -15,6 +15,8 @@ export const syncStateSchema: CollectionSchema = {
   columns: [
     { name: 'userId', storage: 'text', interpretation: 'plain', required: true, immutable: true },
     { name: 'lastSyncAt', storage: 'text', interpretation: { kind: 'datetime' } },
+    // Gmail cursor: advanced only after a sync with no failed batches.
+    { name: 'cursorAt', storage: 'text', interpretation: { kind: 'datetime' } },
   ],
   ownerField: 'userId',
   uniqueOn: ['userId'],

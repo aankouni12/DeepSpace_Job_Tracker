@@ -64,25 +64,15 @@ const EXPECTED_APPS: Record<string, string> = {
   'cedar labs|product designer': 'interview',
 }
 
-test('demo sync: labels, applications, injection, rate limit, isolation', async ({ users }) => {
-  test.setTimeout(120_000)
-  const [a, b] = await users(['Reviewer', 'Reviewer Two'])
-  await Promise.all([a.page.goto('/home'), b.page.goto('/home')])
-
-  const first = await post(a.page, '/api/actions/sync', { source: 'demo' })
-  console.log('SYNC_1 ' + JSON.stringify(first.json))
-  expect(first.status).toBe(200)
-  if (!first.json.success) expect(first.json.code).toBe('rate_limited')
-  else expect(first.json.data.failedBatches).toBe(0)
-
+async function expectDemoData(page: Page, userId?: string) {
   // Labels: every demo email recorded once, with the expected label. The
   // injection email (demo-9) must not change any other label.
-  const emails = await rows(a.page, 'emails')
+  const emails = await rows(page, 'emails')
   const labels = Object.fromEntries(emails.map((r) => [r.data.gmailMessageId, r.data.classification]))
   expect(labels).toEqual(EXPECTED_LABELS)
 
   // Applications: exactly the three real ones; no stray "Acme" application.
-  const apps = await rows(a.page, 'applications')
+  const apps = await rows(page, 'applications')
   const statuses = Object.fromEntries(apps.map((r) => [r.data.key, r.data.status]))
   expect(statuses).toEqual(EXPECTED_APPS)
   expect(apps.some((r) => String(r.data.key).includes('acme'))).toBe(false)
@@ -92,15 +82,61 @@ test('demo sync: labels, applications, injection, rate limit, isolation', async 
     expect([r.data.from, r.data.subject, r.data.snippet].every((v) => !v)).toBe(true)
   }
 
+  // Everything visible belongs to this user.
+  const owners = new Set([...emails, ...apps].map((r) => r.data.userId))
+  expect(owners.size).toBe(1)
+  if (userId) expect([...owners]).toEqual([userId])
+  return [...owners][0]
+}
+
+test('demo sync: labels, injection, rate limit, isolation, delete', async ({ users }) => {
+  test.setTimeout(180_000)
+  const [a, b] = await users(['Reviewer', 'Reviewer Two'])
+  await Promise.all([a.page.goto('/home'), b.page.goto('/home')])
+
+  const first = await post(a.page, '/api/actions/sync', { source: 'demo' })
+  console.log('SYNC_1 ' + JSON.stringify(first.json))
+  expect(first.status).toBe(200)
+  test.skip(
+    !first.json.success && (await rows(a.page, 'emails')).length === 0,
+    'A deleted its data in a run less than 10 minutes ago and is still rate-limited; ' +
+      'wait, or rm -rf .wrangler/state for a fresh local run.',
+  )
+  if (first.json.success) {
+    const d = first.json.data
+    expect(d.failedBatches).toBe(0)
+    // Diagnostics: short ids map back cleanly; the model labeled all 10.
+    expect(d.rejected).toEqual({ unknownId: 0, badLabel: 0, noCompany: 0, notGrounded: 0 })
+    expect(Object.values(d.modelLabels as Record<string, number>).reduce((x, y) => x + y, 0)).toBe(10)
+  } else {
+    expect(first.json.code).toBe('rate_limited')
+  }
+
+  const aUser = await expectDemoData(a.page)
+
   // Rate limit: an immediate second sync is refused.
   const second = await post(a.page, '/api/actions/sync', { source: 'demo' })
   expect(second.json).toMatchObject({ success: false, code: 'rate_limited' })
 
-  // Own sync state is readable; nobody else's is.
+  // B syncs its own demo data; each sees only their own rows.
+  const bSync = await post(b.page, '/api/actions/sync', { source: 'demo' })
+  expect(bSync.json.success || bSync.json.code === 'rate_limited').toBe(true)
+  const bUser = await expectDemoData(b.page)
+  expect(bUser).not.toBe(aUser)
   expect((await rows(a.page, 'syncState')).length).toBe(1)
 
-  // Isolation: the other user sees none of A's rows.
-  for (const collection of ['emails', 'applications', 'syncState']) {
-    expect(await rows(b.page, collection)).toEqual([])
-  }
+  // A deletes its data: only A's emails and applications go; the rate-limit
+  // timestamp stays, so A cannot delete-and-resync to burn owner AI credits.
+  const del = await post(a.page, '/api/actions/deleteMyData', { userId: bUser }) // param is ignored
+  expect(del.json).toEqual({ success: true, data: { deleted: { emails: 10, applications: 3 } } })
+  expect(await rows(a.page, 'emails')).toEqual([])
+  expect(await rows(a.page, 'applications')).toEqual([])
+  const [state] = await rows(a.page, 'syncState')
+  expect(state.data.lastSyncAt).toBeTruthy()
+  expect(state.data.cursorAt ?? null).toBeNull()
+  const afterDelete = await post(a.page, '/api/actions/sync', { source: 'demo' })
+  expect(afterDelete.json).toMatchObject({ success: false, code: 'rate_limited' })
+
+  // B is untouched.
+  await expectDemoData(b.page, bUser)
 })
