@@ -135,10 +135,11 @@ export function validateBatch(batch: InboxEmail[], raw: unknown): Map<string, Cl
     if (!company || company.length > 200 || role.length > 200) continue
 
     // The company must appear in this email's own text, so one email cannot
-    // assign a company to another.
+    // assign a company to another. Both sides use the normalizeKey rules
+    // (case, punctuation, suffixes) and match whole words only.
     const email = batch.find((e) => e.id === id)!
-    const text = clean(`${email.from} ${email.subject} ${email.snippet}`)
-    if (!text.includes(normalizeCompany(company))) continue
+    const text = ` ${clean(`${email.from} ${email.subject} ${email.snippet}`)} `
+    if (!text.includes(` ${normalizeCompany(company)} `)) continue
 
     byId.set(id, { label, company, role: role || UNSPECIFIED_ROLE })
   }

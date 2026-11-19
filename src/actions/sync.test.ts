@@ -103,6 +103,28 @@ describe('validateBatch', () => {
     expect(out.has('zzz')).toBe(false)
   })
 
+  it('matches the company on normalized forms, ignoring case and suffixes', () => {
+    const autoliv = [
+      { ...email('u', 'x', 1), from: 'AUTOLIV Inc. Talent <no-reply@ats.example>', subject: 'Thanks', snippet: 'We got it' },
+      { ...email('v', 'x', 2), from: 'Recruiting <jobs@ats.example>', subject: 'Your application to Autoliv', snippet: '' },
+    ]
+    const out = validateBatch(autoliv, {
+      results: [
+        { id: 'u', label: 'applied', company: 'Autoliv', role: 'Engineer' },
+        { id: 'v', label: 'applied', company: 'AUTOLIV, INC.', role: 'Engineer' },
+      ],
+    })!
+    expect(out.get('u')?.label).toBe('applied')
+    expect(out.get('v')?.label).toBe('applied')
+  })
+
+  it('matches whole words only', () => {
+    const out = validateBatch([email('w', 'Your metadata export is ready', 1)], {
+      results: [{ id: 'w', label: 'offer', company: 'Meta', role: 'x' }],
+    })!
+    expect(out.get('w')?.label).toBe('not_job_related')
+  })
+
   it('rejects a company that does not appear in that email (cross-email injection)', () => {
     const out = validateBatch(batch, {
       results: [{ id: 'b', label: 'offer', company: 'Northwind Robotics', role: 'x' }],

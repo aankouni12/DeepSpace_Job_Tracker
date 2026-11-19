@@ -225,3 +225,18 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - Full suite, `test run all`: 12/12 passed. That includes `collab.spec.ts`, now that two accounts exist, and a rerun of the sync spec, whose first call was `rate_limited` (retry in 550 s). It passed by checking the stored records.
 - **Measured cost:** one demo sync = 1 AI call = $0.04181658 held − $0.04136821 refunded = **$0.00045 (≈0.045 credits) to the owner**. The rerun made **no** AI calls: `anthropic` count stayed at 3.
 - **Not tested here:** real Gmail, which is tested manually after deploy because Playwright can't mock calls the server makes.
+
+**Follow-up before merging feature 3 (requested by user):**
+- **Cost of the first demo sync** (2026-11-19 01:05:55 UTC, 10 emails, 1 batch, `claude-haiku-5-5`, billed to the owner): $0.04181658 held, $0.04136821 refunded = **$0.00044837 net ≈ 0.045 credits**. A second demo sync from an empty local database (01:11:59) cost the same, to the cent.
+- **Company check:**
+  - The user asked that it compare normalized forms, not exact strings. It already did: `clean()` and `normalizeCompany()` on both sides, so case, punctuation and suffixes are ignored.
+  - It was a plain substring match, though, so "Meta" matched "metadata". Changed to **whole-word** matching.
+  - New unit tests:
+    - "AUTOLIV Inc." in the email with "Autoliv" from the model is accepted.
+    - "Autoliv" in the email with "AUTOLIV, INC." from the model is accepted.
+    - "Meta" against "metadata" is rejected.
+  - **Remaining risk:** an email that never names the company (some ATS templates put it only in the body, which `metadata` format doesn't fetch) is still recorded as `not_job_related` and not retried.
+- **Results after the change:**
+  - vitest **31/31** (sync 14, permissions 14, prerender 3).
+  - `sync-demo.spec.ts` **1/1** on an emptied local database (`.wrangler/state` deleted, as the docs suggest): `classified 10, failedBatches 0, created 3, updated 4`.
+  - Full Playwright suite **12/12**, including the sync spec's rerun on the rate-limited path.
