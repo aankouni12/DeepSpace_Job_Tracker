@@ -62,6 +62,70 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
   await page.screenshot({ path: testInfo.outputPath('timeline.png') })
   await page.keyboard.press('Escape')
 
+  // Assistant: a status change happens only on Confirm. The model is mocked
+  // (page.route on /api/ai/chat) with a reply that calls propose_status_change
+  // for Kestrel; the real tool and real write path are used for everything else.
+  const kestrelId = await page.evaluate(async () => {
+    const { token } = await (await fetch('/api/auth/token', { method: 'POST', credentials: 'include' })).json()
+    const r = await fetch('/_deepspace/agent/browser/tools/list_applications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ input: {} }),
+    })
+    const { result } = await r.json()
+    return (result.applications as { id: string; company: string }[]).find((a) => a.company === 'Kestrel Systems')!.id
+  })
+  const sse = (chunks: object[]) => chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n'
+  let call = 0
+  await page.route('**/api/ai/chat', (route) => {
+    const toolCallId = `t${++call}`
+    return route.fulfill({
+      contentType: 'text/event-stream',
+      body: sse([
+        { type: 'start' },
+        { type: 'tool-input-available', toolCallId, toolName: 'propose_status_change', input: { applicationId: kestrelId, status: 'interview' } },
+        {
+          type: 'tool-output-available',
+          toolCallId,
+          output: { proposal: { applicationId: kestrelId, company: 'Kestrel Systems', role: 'Backend Developer', from: 'applied', to: 'interview' } },
+        },
+        { type: 'text-delta', id: 'x', delta: 'I proposed moving Kestrel Systems to Interview. Confirm below.' },
+        { type: 'finish' },
+      ]),
+    })
+  })
+  await page.getByRole('button', { name: 'Ask the assistant' }).click()
+  const panel = page.getByTestId('assistant-panel')
+  const ask = async () => {
+    await panel.getByRole('textbox').fill('Move Kestrel to Interview')
+    await panel.getByRole('button', { name: 'Send message' }).click()
+  }
+  const kestrel = (lane: string) => page.getByTestId(`lane-${lane}`).getByText('Kestrel Systems', { exact: true })
+
+  await ask()
+  const proposal = panel.getByTestId('status-proposal').last()
+  await expect(proposal).toContainText('Move Kestrel Systems (Backend Developer) from applied to interview?')
+  await expect(panel.getByText('Confirm below.')).toBeVisible()
+  await expect(kestrel('applied')).toBeVisible() // proposed, not changed
+  await page.screenshot({ path: testInfo.outputPath('assistant-proposal.png') })
+
+  await proposal.getByRole('button', { name: 'Cancel' }).click()
+  await expect(proposal).toContainText('Cancelled. Nothing changed.')
+  await expect(kestrel('applied')).toBeVisible()
+
+  // A mocked turn is never saved server-side, so the panel's in-flight overlay
+  // replaces it on the next send: only the new proposal card is shown.
+  await ask()
+  const second = panel.getByTestId('status-proposal').last()
+  await expect(second.getByRole('button', { name: 'Confirm' })).toBeEnabled()
+  await expect(kestrel('applied')).toBeVisible()
+  await second.getByRole('button', { name: 'Confirm' }).click()
+  await expect(second).toContainText("Done. It's in interview.")
+  await expect(kestrel('interview')).toBeVisible()
+  await page.reload()
+  await expect(kestrel('interview')).toBeVisible({ timeout: 20_000 })
+  await page.unroute('**/api/ai/chat')
+
   // Delete from Settings, then the first-run screen is back.
   await page.goto('/settings')
   await page.getByRole('button', { name: 'Delete my synced data' }).click()

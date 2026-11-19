@@ -17,7 +17,6 @@ import { createUIMessageStreamResponse, toUIMessageStream, type ModelMessage } f
 import {
   deepSpaceAgentErrorSummary,
   prepareMessagesWithCompaction,
-  listDeepSpaceAgentModels,
   resolveDeepSpaceAgentModel,
   streamDeepSpaceAgent,
   turnsToCoreMessages,
@@ -33,9 +32,9 @@ import {
   appendMessage,
   loggableError,
 } from 'deepspace/worker'
-import type { AgentToolAccessResult, AgentToolRouteOptions, ChatTurn } from 'deepspace/worker'
-import { schemas } from '../schemas.js'
+import type { ActionTools, AgentToolAccessResult, AgentToolRouteOptions, ChatTurn } from 'deepspace/worker'
 import { buildSystemPrompt } from './tools.js'
+import { createActionTools } from '../server/action-routes.js'
 // Type-only — TypeScript strips these at runtime, so no circular import
 // with worker.ts (which imports `registerAiChatRoutes` from this file).
 import type { Env, AppContext } from '../../worker.js'
@@ -52,9 +51,46 @@ function recordRoomStub(env: Env): DurableObjectStub {
   return env.RECORD_ROOMS.get(env.RECORD_ROOMS.idFromName(`app:${env.DEEPSPACE_APP_ID}`))
 }
 
-// Cap on user-supplied content length. Far above any realistic message;
-// blocks accidental DoS via megabyte payloads.
-const MAX_USER_CONTENT_LENGTH = 100_000
+// The assistant is owner-billed, so the server picks the model (the client's
+// modelId is ignored) and bounds each message's size and tool calls.
+const ASSISTANT_MODEL = 'claude-haiku-5-5'
+const MAX_USER_CONTENT_LENGTH = 2_000
+
+// Per-user message limit: a fixed 24-hour window that starts at the first
+// message. Stored on the caller's syncState row, which users can read but not
+// write (src/schemas/sync-state-schema.ts), so nobody can reset their own count.
+export const CHAT_DAILY_LIMIT = 30
+const CHAT_WINDOW_MS = 24 * 60 * 60 * 1000
+
+type ChatQuotaRow = { chatWindowStart?: string; chatCount?: number }
+
+/**
+ * Count one message against the caller's limit, or refuse it. `tools` must be
+ * the server's RBAC-off action tools; `userId` is the verified caller only.
+ * Two requests in the same instant can both pass (same accepted race as sync).
+ */
+export async function claimChatMessage(
+  tools: ActionTools,
+  userId: string,
+  now: number,
+): Promise<{ ok: true } | { ok: false; retryAfterSeconds: number }> {
+  const existing = await tools.get<ChatQuotaRow>('syncState', userId)
+  const row = existing.success ? existing.data.record.data : undefined
+  const start = Date.parse(row?.chatWindowStart ?? '')
+  const inWindow = Number.isFinite(start) && now - start < CHAT_WINDOW_MS
+  const count = inWindow ? (row?.chatCount ?? 0) : 0
+  if (count >= CHAT_DAILY_LIMIT) {
+    return { ok: false, retryAfterSeconds: Math.ceil((start + CHAT_WINDOW_MS - now) / 1000) }
+  }
+  const data: ChatQuotaRow = inWindow
+    ? { chatCount: count + 1 }
+    : { chatWindowStart: new Date(now).toISOString(), chatCount: 1 }
+  const res = existing.success
+    ? await tools.update('syncState', userId, data)
+    : await tools.create('syncState', { userId, ...data }, userId)
+  if (!res.success) throw new Error(`chat limit write failed: ${res.error}`)
+  return { ok: true }
+}
 
 // Derive a chat title from the first user message — first non-empty line,
 // trimmed to ~50 chars with an ellipsis.
@@ -151,11 +187,10 @@ export function registerAiChatRoutes(
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
     if (!jwt) return c.json({ error: 'Unauthorized' }, 401)
 
-    const { chatId, userMessageId, content, modelId } = await c.req.json<{
+    const { chatId, userMessageId, content } = await c.req.json<{
       chatId?: string
       userMessageId?: string
       content?: string
-      modelId?: string
     }>()
     if (typeof chatId !== 'string' || !chatId) return c.json({ error: 'chatId is required' }, 400)
     if (typeof userMessageId !== 'string' || !userMessageId)
@@ -165,25 +200,25 @@ export function registerAiChatRoutes(
     if (content.length > MAX_USER_CONTENT_LENGTH) {
       return c.json({ error: `content exceeds ${MAX_USER_CONTENT_LENGTH} chars` }, 413)
     }
-    const selectedModel = resolveDeepSpaceAgentModel(modelId, 'application')
-    if (!selectedModel) {
-      // Name the valid ids: the caller has no other way to learn them here.
-      const modelIds = listDeepSpaceAgentModels('application').map((model) => model.id)
-      return c.json(
-        {
-          error: `Unknown modelId: ${modelId}. Valid: ${modelIds.join(', ')}`,
-          code: 'unknown_model',
-          modelIds,
-        },
-        400,
-      )
-    }
+    const selectedModel = resolveDeepSpaceAgentModel(ASSISTANT_MODEL, 'application')
+    if (!selectedModel) throw new Error(`${ASSISTANT_MODEL} is not an application agent model`)
 
     const stub = recordRoomStub(c.env)
     const chat = await getChat(stub, chatId, auth.userId)
     if (!chat) {
       console.warn('[ai-chat] REQUEST chat-not-found', { userId: auth.userId, chatId })
       return c.json({ error: 'Chat not found' }, 404)
+    }
+
+    // Before any model call (compaction included). Plain text: the panel
+    // shows the response body as the error message.
+    const quota = await claimChatMessage(createActionTools(c.env, auth.userId, jwt), auth.userId, Date.now())
+    if (!quota.ok) {
+      const hours = Math.ceil(quota.retryAfterSeconds / 3600)
+      return c.text(
+        `You've used all ${CHAT_DAILY_LIMIT} assistant messages for today. Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`,
+        429,
+      )
     }
 
     // Load history before writing this turn. `persistTurn` later writes user then
@@ -220,8 +255,8 @@ export function registerAiChatRoutes(
         ? { text: chat.compactedSummary, throughId: chat.compactedThroughId }
         : undefined
 
-    // User-billed: compaction is part of the user's chat experience, not infra.
-    const summarizer = makeDefaultSummarizer(c.env, { authToken: jwt })
+    // Owner-billed (no authToken), like the chat itself; covered by the limit above.
+    const summarizer = makeDefaultSummarizer(c.env)
     const { messages: prepared, newSummary } = await prepareMessagesWithCompaction(
       turns,
       DEFAULT_CONTEXT_CONFIG,
@@ -240,7 +275,7 @@ export function registerAiChatRoutes(
       provider: selectedModel.provider,
       modelId: usedModelId,
     }
-    const baseSystem = buildSystemPrompt(c.env.APP_NAME, schemas)
+    const baseSystem = buildSystemPrompt(new Date())
 
     // Compaction inserts at most one summary system message at index 0; fold
     // it into the top-level `system` so we don't pass two system roles. Then
@@ -351,7 +386,10 @@ export function registerAiChatRoutes(
     const { result } = streamDeepSpaceAgent(c.env, {
       profile: 'application',
       modelId: usedModelId,
-      authToken: jwt,
+      // No authToken: bills the app owner (APP_OWNER_JWT), so reviewers with
+      // zero credits can chat. Bounded by CHAT_DAILY_LIMIT per user.
+      effort: 'low',
+      maxToolCalls: 6,
       instructions: systemText,
       messages,
       tools,

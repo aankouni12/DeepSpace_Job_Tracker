@@ -4,8 +4,9 @@
  * ever receives their own rows, so the board updates as sync writes batches.
  */
 
-import { useMemo } from 'react'
-import { useMutations, useQuery } from 'deepspace'
+import { useMemo, useState } from 'react'
+import { useMutations, useQuery, useUser } from 'deepspace'
+import { ChatPanel } from '@/components/ChatPanel'
 import { Button, useToast } from '@/components/ui'
 import {
   ApplicationCard,
@@ -25,6 +26,8 @@ export default function BoardPage() {
   const syncState = useQuery<SyncStateRow>('syncState')
   const { put, ready } = useMutations<Application>('applications')
   const { error } = useToast()
+  const { user } = useUser()
+  const [assistantOpen, setAssistantOpen] = useState(false)
 
   const state = syncState.records[0]?.data
   const sync = useSync(state, syncState.status === 'ready')
@@ -67,8 +70,40 @@ export default function BoardPage() {
             Sorted from your email replies. Change a status if it&apos;s wrong.
           </p>
         </div>
-        <SyncControls sync={sync} lastSyncAt={state?.lastSyncAt} />
+        <div className="flex flex-wrap items-end gap-3">
+          <SyncControls sync={sync} lastSyncAt={state?.lastSyncAt} />
+          <Button variant="outline" onClick={() => setAssistantOpen((o) => !o)} aria-expanded={assistantOpen}>
+            {assistantOpen ? 'Close assistant' : 'Ask the assistant'}
+          </Button>
+        </div>
       </header>
+
+      {assistantOpen && user && (
+        <aside
+          aria-label="Assistant"
+          data-testid="assistant-panel"
+          className="fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l border-border bg-background shadow-xl sm:w-[26rem]"
+        >
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="font-medium">Assistant</h2>
+            <Button variant="ghost" size="sm" onClick={() => setAssistantOpen(false)}>
+              Close
+            </Button>
+          </div>
+          <ChatPanel
+            chatId={null}
+            userId={user.id}
+            models={[]}
+            compact
+            className="min-h-0 flex-1"
+            emptyStatePrompts={[
+              "Which companies haven't replied in 2 weeks?",
+              'How many rejections this month?',
+              'What should I follow up on?',
+            ]}
+          />
+        </aside>
+      )}
 
       <div className="-mx-4 flex snap-x snap-mandatory gap-4 overflow-x-auto px-4 pb-2 sm:mx-0 sm:grid sm:grid-cols-2 sm:overflow-visible sm:px-0 lg:grid-cols-4">
         {lanes.map((lane) => (

@@ -34,16 +34,23 @@ async function post(page: Page, path: string, body: unknown) {
   )
 }
 
-type Row = { recordId: string; data: Record<string, unknown> }
-
-async function rows(page: Page, collection: string): Promise<Row[]> {
-  const res = await post(page, '/_deepspace/agent/browser/tools/records_query', {
-    input: { collection, limit: 200 },
-  })
-  const records = res.json?.result?.data?.records ?? res.json?.data?.records ?? res.json?.records
-  if (!Array.isArray(records)) throw new Error(`records_query ${collection}: ${JSON.stringify(res)}`)
-  return records
+// Read through the assistant's own tools (the only agent tools there are).
+// They return metadata only; the checks on stored content, userId and
+// syncState fields are unit tests in src/actions/sync.test.ts.
+async function tool<T>(page: Page, name: string, input: Record<string, unknown> = {}): Promise<T> {
+  const res = await post(page, `/_deepspace/agent/browser/tools/${name}`, { input })
+  if (!res.json?.ok) throw new Error(`${name}: ${JSON.stringify(res)}`)
+  return res.json.result as T
 }
+
+type App = { id: string; company: string; role: string; status: string }
+type EmailEvent = { messageId: string; classification: string }
+
+const apps = async (page: Page) => (await tool<{ applications: App[] }>(page, 'list_applications')).applications
+const emailEvents = async (page: Page) =>
+  (await tool<{ events: EmailEvent[] }>(page, 'list_email_events', { includeUnrelated: true })).events
+// The demo cards show "Cedar Labs Inc."; the stored key drops the suffix.
+const keyOf = (a: App) => `${a.company.toLowerCase().replace(/,?\s+inc\.?$/, '')}|${a.role.toLowerCase()}`
 
 const EXPECTED_LABELS: Record<string, string> = {
   'demo-1': 'applied',
@@ -68,29 +75,18 @@ const EXPECTED_APPS: Record<string, string> = {
   'maple ridge software|qa engineer': 'rejected',
 }
 
-async function expectDemoData(page: Page, userId?: string) {
+/** Checks the demo data and returns this user's application ids. */
+async function expectDemoData(page: Page): Promise<string[]> {
   // Labels: every demo email recorded once, with the expected label. The
   // injection email (demo-9) must not change any other label.
-  const emails = await rows(page, 'emails')
-  const labels = Object.fromEntries(emails.map((r) => [r.data.gmailMessageId, r.data.classification]))
+  const labels = Object.fromEntries((await emailEvents(page)).map((e) => [e.messageId, e.classification]))
   expect(labels).toEqual(EXPECTED_LABELS)
 
-  // Applications: exactly the three real ones; no stray "Acme" application.
-  const apps = await rows(page, 'applications')
-  const statuses = Object.fromEntries(apps.map((r) => [r.data.key, r.data.status]))
-  expect(statuses).toEqual(EXPECTED_APPS)
-  expect(apps.some((r) => String(r.data.key).includes('acme'))).toBe(false)
-
-  // Not-job-related rows keep no content.
-  for (const r of emails.filter((r) => r.data.classification === 'not_job_related')) {
-    expect([r.data.from, r.data.subject, r.data.snippet].every((v) => !v)).toBe(true)
-  }
-
-  // Everything visible belongs to this user.
-  const owners = new Set([...emails, ...apps].map((r) => r.data.userId))
-  expect(owners.size).toBe(1)
-  if (userId) expect([...owners]).toEqual([userId])
-  return [...owners][0]
+  // Applications: exactly the five real ones; no stray "Acme" application.
+  const mine = await apps(page)
+  expect(Object.fromEntries(mine.map((a) => [keyOf(a), a.status]))).toEqual(EXPECTED_APPS)
+  expect(mine.some((a) => /acme/i.test(a.company))).toBe(false)
+  return mine.map((a) => a.id).sort()
 }
 
 test('demo sync: labels, injection, rate limit, isolation, delete', async ({ users }) => {
@@ -102,7 +98,7 @@ test('demo sync: labels, injection, rate limit, isolation, delete', async ({ use
   console.log('SYNC_1 ' + JSON.stringify(first.json))
   expect(first.status).toBe(200)
   test.skip(
-    !first.json.success && (await rows(a.page, 'emails')).length === 0,
+    !first.json.success && (await emailEvents(a.page)).length === 0,
     'A deleted its data in a run less than 10 minutes ago and is still rate-limited; ' +
       'wait, or rm -rf .wrangler/state for a fresh local run.',
   )
@@ -116,7 +112,7 @@ test('demo sync: labels, injection, rate limit, isolation, delete', async ({ use
     expect(first.json.code).toBe('rate_limited')
   }
 
-  const aUser = await expectDemoData(a.page)
+  const aIds = await expectDemoData(a.page)
 
   // Rate limit: an immediate second sync is refused.
   const second = await post(a.page, '/api/actions/sync', { source: 'demo' })
@@ -125,22 +121,40 @@ test('demo sync: labels, injection, rate limit, isolation, delete', async ({ use
   // B syncs its own demo data; each sees only their own rows.
   const bSync = await post(b.page, '/api/actions/sync', { source: 'demo' })
   expect(bSync.json.success || bSync.json.code === 'rate_limited').toBe(true)
-  const bUser = await expectDemoData(b.page)
-  expect(bUser).not.toBe(aUser)
-  expect((await rows(a.page, 'syncState')).length).toBe(1)
+  const bIds = await expectDemoData(b.page)
+  expect(aIds.filter((id) => bIds.includes(id))).toEqual([])
 
   // A deletes its data: only A's emails and applications go; the rate-limit
   // timestamp stays, so A cannot delete-and-resync to burn owner AI credits.
-  const del = await post(a.page, '/api/actions/deleteMyData', { userId: bUser }) // param is ignored
+  const del = await post(a.page, '/api/actions/deleteMyData', { userId: 'someone-else' }) // param is ignored
   expect(del.json).toEqual({ success: true, data: { deleted: { emails: 12, applications: 5 } } })
-  expect(await rows(a.page, 'emails')).toEqual([])
-  expect(await rows(a.page, 'applications')).toEqual([])
-  const [state] = await rows(a.page, 'syncState')
-  expect(state.data.lastSyncAt).toBeTruthy()
-  expect(state.data.cursorAt ?? null).toBeNull()
+  expect(await emailEvents(a.page)).toEqual([])
+  expect(await apps(a.page)).toEqual([])
   const afterDelete = await post(a.page, '/api/actions/sync', { source: 'demo' })
   expect(afterDelete.json).toMatchObject({ success: false, code: 'rate_limited' })
 
   // B is untouched.
-  await expectDemoData(b.page, bUser)
+  expect(await expectDemoData(b.page)).toEqual(bIds)
+})
+
+test('agent tool surface: only the three assistant tools, over HTTP and MCP', async ({ users }) => {
+  const [a] = await users(['Reviewer'])
+  await a.page.goto('/home')
+  const expected = ['list_applications', 'list_email_events', 'propose_status_change']
+
+  const http = await a.page.evaluate(async () => {
+    const { token } = await (await fetch('/api/auth/token', { method: 'POST', credentials: 'include' })).json()
+    const r = await fetch('/_deepspace/agent/browser/tools', { headers: { Authorization: `Bearer ${token}` } })
+    return r.json()
+  })
+  expect((http.tools as { name: string }[]).map((t) => t.name).sort()).toEqual(expected)
+
+  const mcp = await post(a.page, '/_deepspace/agent/browser/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+  expect((mcp.json.result.tools as { name: string }[]).map((t) => t.name).sort()).toEqual(expected)
+
+  // A removed tool can't be called by name either.
+  const write = await post(a.page, '/_deepspace/agent/browser/tools/records_update', {
+    input: { collection: 'applications', recordId: 'x', data: { status: 'offer' } },
+  })
+  expect(write.status).toBe(404)
 })

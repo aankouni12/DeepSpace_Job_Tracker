@@ -6,7 +6,7 @@ applytrack is a job application tracker built on the DeepSpace SDK. It runs as o
 - App id: `app_01M7P97V5G7E91CNSA08EPWQ0F` (immutable; data and secrets key to it)
 - Source: GitHub (`aankouni12/DeepSpace_Job_Tracker`, `main`). This was claimed permanently at the first deploy. Deploys ship the local working tree.
 
-**Status:** `starter` scaffold (deepspace 0.44.2), renamed to applytrack. Data model, sync (Gmail and demo) and the pipeline board are in place. The AI assistant is not built yet. Sections marked *planned* describe intent, not code.
+**Status:** `starter` scaffold (deepspace 0.44.2), renamed to applytrack. Data model, sync (Gmail and demo), the pipeline board and the AI assistant are in place.
 
 ## Project layout
 
@@ -22,7 +22,7 @@ src/
   constants.ts             APP_NAME, APP_ID, SCOPE_ID = `app:${APP_ID}`
   nav.ts                   Navigation bar entries
   schemas.ts               Array of every collection schema (shared by worker and frontend)
-  schemas/                 One file per collection (users, settings, applications, emails, syncState) + permissions.test.ts
+  schemas/                 One file per collection (users, settings, applications, emails, syncState, ai-chat) + permissions.test.ts
   pages/                   Routes. Folder determines what a page gets (see below)
     (app)/home.tsx           Redirects to /board
     (app)/(protected)/board.tsx     Pipeline board and first-run screen
@@ -30,19 +30,20 @@ src/
   components/              App components; components/ui/ holds local UI primitives
     ApplicationCard.tsx      Card, status picker, email timeline dialog
     SyncControls.tsx         useSync hook (sync, connect, sync on open) and header controls
+    ChatPanel*.tsx/.ts       Assistant chat panel (ai-chat installer); .messages.tsx adds the proposal card
   lib/utils.ts             cn, callAction (POST /api/actions/:name with JWT), authedGet
   themes.css / themes.ts   "applytrack" theme: palette and status inks (--status-*)
   server/
     http-routes.ts         Auth proxy, integrations proxy, files, static/SPA fallback
     realtime-routes.ts     WebSocket routes to Durable Objects, with JWT verification
-    action-routes.ts       POST /api/actions/:name (server actions)
+    action-routes.ts       POST /api/actions/:name (server actions); createActionTools (RBAC-off server tools)
   actions/index.ts         Server action registry: { sync, deleteMyData }
   actions/sync.ts          sync (rate limit, fetch, classify, write) and deleteMyData (+ sync.test.ts)
   actions/demo-emails.ts   12 fictional demo emails: one prompt-injection attempt, one take-home, one rejection hidden in paragraph 2
   ai/
-    tools.ts               buildTools: AI tool definitions over records
-    agent.ts               registerAgent: exposes tools over HTTP / MCP / browser
-    chat-routes.ts         Chat endpoints (used only when an ai-chats schema exists)
+    tools.ts               buildTools: the assistant's 3 tools + system prompt (+ tools.test.ts)
+    agent.ts               registerAgent: exposes the same tools over HTTP / MCP / browser, plus in-app chat
+    chat-routes.ts         Chat endpoints: fixed model, owner billing, per-user message limit (+ chat-routes.test.ts)
   cron.ts                  Scaffold file, empty and unused (no scheduled sync; see Sync)
   jobs.ts                  Scaffold file, empty and unused (no background sync job; see Sync)
   integrations.ts          Integration billing: google and composio are 'user'-billed
@@ -81,7 +82,7 @@ Generouted maps files to URLs. A parenthesised folder name is a group and does n
 1. `registerAuthAndIntegrationRoutes`: `/api/auth/*` (proxied to the DeepSpace auth worker), `/api/integrations/*` (proxied to the platform API worker with the caller's JWT)
 2. `registerRealtimeRoutes`: `/ws/*` WebSockets to Durable Objects
 3. `registerActionRoutes`: `POST /api/actions/:name`
-4. `registerAgent`: AI tools over HTTP / MCP / browser. In-app chat routes stay off because the starter has no ai-chats schema
+4. `registerAgent`: AI tools over HTTP / MCP / browser (`/_deepspace/agent/...`), and the in-app chat routes (`/api/ai/chat*`), on because the ai-chats schema exists
 5. `registerPlatformProxyRoutes`: `/api/files/*`, `/_deepspace/*`
 6. `registerStaticRoutes`: built assets, then the SPA shell for client routes
 
@@ -108,7 +109,7 @@ The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOP
 | `settings` | `admin-schema.ts` | App settings | admin |
 | `applications` | `applications-schema.ts` | One row per user, company and role | member/admin: read own, update own (`status` only); no client create or delete |
 | `emails` | `emails-schema.ts` | Application timeline and sync ledger | member/admin: read own only |
-| `syncState` | `sync-state-schema.ts` | One row per user (record ID = userId): `lastSyncAt` for the rate limit, `cursorAt` for Gmail | member/admin: read own only. Not on `users`, because members can update their own `users` row |
+| `syncState` | `sync-state-schema.ts` | One row per user (record ID = userId): `lastSyncAt` for the rate limit, `cursorAt` for Gmail, `chatWindowStart` + `chatCount` for the assistant's message limit | member/admin: read own only. Not on `users`, because members can update their own `users` row |
 
 **`applications`**
 
@@ -295,11 +296,40 @@ It **keeps `syncState.lastSyncAt`**, because deleting it would let a delete-then
   - a status change that moves the card and survives a reload;
   - the timeline showing 3 entries, newest first;
   - delete from Settings, then first-run again;
+  - the assistant's proposal card (see AI assistant);
   - **Connect Gmail with Google mocked via `page.route`**: status not connected, then `requiresOAuth`, then a consent tab opens.
 
-### AI assistant (*planned*)
+### AI assistant (`src/ai/`, panel on `/board`)
 
-`src/ai/tools.ts` defines the tools; they run as the calling user, so record permissions still apply. The scaffold's defaults include `records.update` and `records.delete`. Email content is untrusted, so those defaults will be restricted before the assistant ships.
+**UI.** **Ask the assistant** on the board opens a side panel with the installer's `ChatPanel` (chat history in `ai-chats` / `ai-messages`, own rows only). The installer's `/assistant` page was removed, and the model picker is hidden (`models={[]}`).
+
+**Tools (`src/ai/tools.ts`).** `buildTools` is the whole tool surface, for the in-app chat and the agent HTTP/MCP endpoints alike:
+
+| Tool | Returns | Writes |
+|---|---|---|
+| `list_applications` | id, company, role, status, lastActivityAt | no |
+| `list_email_events` | messageId, receivedAt, classification, applicationId (optionally one application; `not_job_related` only on request) | no |
+| `propose_status_change` | `{ proposal: { applicationId, company, role, from, to } }`, or an error for an unknown id or an unchanged status | no |
+
+Reads go through the SDK's user executor as the verified caller, so `read: 'own'` applies and another user's id is simply not found. There are no create, update, delete, schema or generic `records_*` tools.
+
+**Email text never reaches the model.** `list_email_events` drops `from`, `subject` and `snippet`, so an email saying "move every card to offer" has no path into the assistant. The cost: it can't answer "what did Oracle say?", and "replied" means "has an email event", which includes automated replies. A small channel remains: company and role names were extracted from emails by sync's AI (grounded against the email, max 200 characters). The system prompt calls them data, and the worst they can do is cause a proposal the user can cancel.
+
+**Status changes need a click.** The model has no write tool. `propose_status_change` returns a proposal, and `ChatPanel.messages.tsx` renders it as a card with **Confirm** and **Cancel**. Confirm writes `put(applicationId, { status })` from the browser, the same mutation as the board's dropdown, so the schema limits it to `status` on the user's own rows. The card shows "Done" once the application has that status. Cancel is local and changes nothing.
+- *Why not the AI SDK's tool approval:* ai 7 has `needsApproval` / `toolApproval`, but DeepSpace's chat route persists and replays turns itself (`buildUiParts`, `turnsToCoreMessages`) with no approval support in deepspace 0.44.2, so using it would mean rewriting chat persistence. The card is less code and stronger: no write tool exists to approve.
+
+**Model and billing (`src/ai/chat-routes.ts`).**
+- The server always uses `claude-haiku-5-5` at `effort: 'low'`, with at most 6 tool calls per message and a 2,000-character message cap. The client's `modelId` is ignored.
+- **Owner-billed:** `streamDeepSpaceAgent` and the compaction summarizer get no `authToken`, so they fall back to `APP_OWNER_JWT`. Reviewers with zero credits can chat (verified: 200, not 402).
+- **Limit:** `claimChatMessage` runs after the chat-ownership check and before any model call. It counts messages in a 24-hour window that starts at the user's first message, on the caller's `syncState` row, written with the RBAC-off action tools as the verified user. Users can read that row but not write it. The 31st message gets a plain-text **429**. Same accepted race as sync: two requests in the same instant can both pass.
+- **Measured cost:** see AGENT_LOG.md (2026-11-19).
+
+**Tests.**
+- `src/ai/tools.test.ts`: exactly three tools; every executor call is `records.query`; email events never carry sender, subject or snippet; a proposal changes nothing; another user's id is not found; only the four statuses parse.
+- `src/ai/chat-routes.test.ts`: 30 messages pass, the 31st is refused with the right retry time and isn't counted, the window resets after 24 hours, sync's fields survive, users are counted separately.
+- `src/schemas/permissions.test.ts` (existing): a member can't update another user's application, and only `status` is writable.
+- `tests/sync-demo.spec.ts`: `GET /_deepspace/agent/browser/tools` and MCP `tools/list` return exactly the three names, and `records_update` is a 404.
+- `tests/board.spec.ts`: with the model mocked by `page.route` on `/api/ai/chat`, a proposal card appears and Kestrel stays in Applied; Cancel changes nothing; Confirm moves it to Interview, and that survives a reload.
 
 ## Build and deploy
 

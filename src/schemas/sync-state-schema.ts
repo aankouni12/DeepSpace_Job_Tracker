@@ -1,6 +1,6 @@
 /**
  * Sync state — one row per user (record id = userId), written only by the
- * sync actions. Holds the rate-limit timestamp, so it must not be on `users`:
+ * sync actions and the assistant route. Holds the rate limits, so it must not be on `users`:
  * members can update their own users row and would reset their own limit.
  * Users may read their own row (for "last synced"); nobody can write it.
  */
@@ -17,6 +17,9 @@ export const syncStateSchema: CollectionSchema = {
     { name: 'lastSyncAt', storage: 'text', interpretation: { kind: 'datetime' } },
     // Gmail cursor: advanced only after a sync with no failed batches.
     { name: 'cursorAt', storage: 'text', interpretation: { kind: 'datetime' } },
+    // Assistant message limit (owner-billed AI), written by /api/ai/chat.
+    { name: 'chatWindowStart', storage: 'text', interpretation: { kind: 'datetime' } },
+    { name: 'chatCount', storage: 'number', interpretation: 'plain' },
   ],
   ownerField: 'userId',
   uniqueOn: ['userId'],

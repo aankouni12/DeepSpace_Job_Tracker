@@ -15,7 +15,7 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - Tests: 64 unit, 13 Playwright.
 
 **Left before Saturday 2026-11-21, 11:59 PM ET:**
-1. **AI assistant:** `npx deepspace add ai-chat`. Trim `src/ai/tools.ts` to reads, plus status changes only. Every write needs the user's confirmation in the UI, so email text in the model's context can't change records on its own.
+1. **AI assistant:** built on `feature/assistant` (2026-11-19 entry below). Next: security review, merge, deploy, then measure cost per message on a real-Gmail account.
 2. **Self-host IBM Plex Sans** (drop the Google Fonts link).
 3. **Final tests:** full suite on fresh data, plus a manual real-Gmail pass on the live app.
 4. **Writeup:** include the privacy tradeoff (bodies go to the AI provider, capped, not stored) and the limitations below.
@@ -465,3 +465,52 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 **Verified by the user:** T1 (Gmail consent and response format in the console); the first and second real syncs (result tables); that the first sync's 0 was correct (checked in Gmail); the board spot-check (column by column); the Oracle root cause (opened the email); and running the release-6 delete and re-sync.
 **Verified by the agent:** docs and SDK research and line citations; T3/T3b billing; all unit and Playwright runs (latest 64/64 and 13/13); `/security-review` on every branch; live checks after each deploy (401 when signed out, schema list, 0 schema-lint warnings, no secrets); and counts of the user's stored records, never content.
+
+---
+
+## 2026-11-19: AI assistant (branch `feature/assistant`)
+
+**Asked:**
+- A chat panel on the board for questions like "which companies haven't replied in 2 weeks?" and "move Stellantis to Interview".
+- Install with `npx deepspace add ai-chat`, and trim the tools to: read applications, read email metadata, and change status. No create, delete or schema tools.
+- No email subjects, senders or snippets for the model.
+- Status changes need confirmation; use the platform's tool approval if it exists.
+- Owner billing with a per-user limit enforced on the server.
+- Tests: the assistant can't modify another user's applications, can't change any field but status, and a change happens only after confirmation.
+
+**Plan approved** with the installer's 5 dependencies (react-markdown, remark-gfm, remark-breaks, rehype-highlight, highlight.js) and removing the `/assistant` page.
+
+**User's notes on approval:**
+- Don't put the Haiku list price in the docs without a source; log only the measured cost.
+- `buildTools` is also served by the agent HTTP/MCP endpoints, so add a test that the tool list everywhere is exactly the three tools.
+
+**Research:**
+- **Tool approval:** ai 7.0.107 has `needsApproval` / `toolApproval` and signed approval responses. But DeepSpace's chat route saves and replays turns itself, and deepspace 0.44.2 has no approval support (no "approval" in its build). Using the SDK version would mean rewriting chat persistence.
+- **Instead:** the model gets no write tool at all. It proposes, the user clicks Confirm, and the browser writes with the same mutation as the board's dropdown.
+
+**Built** (details in ARCHITECTURE.md → AI assistant):
+- **Tools:** `src/ai/tools.ts` now has exactly `list_applications`, `list_email_events` (metadata only) and `propose_status_change` (reads only).
+- **Chat route:** `src/ai/chat-routes.ts` always uses `claude-haiku-5-5` at low effort, with at most 6 tool calls per message and a 2,000-character message cap. Owner-billed, chat and summarizer both. `claimChatMessage` allows 30 messages per user per 24 hours, stored on `syncState` (new `chatWindowStart` and `chatCount` columns); the 31st gets a 429.
+- **Panel:** on `/board`, with the model picker hidden. A proposal card with Confirm and Cancel lives in `ChatPanel.messages.tsx`.
+- `createActionTools` is now exported from `action-routes.ts`, so the chat route can write the counter.
+
+**Changed along the way (agent decision, flagged during the work):** `tests/sync-demo.spec.ts` read records through the generic `records_query` agent tool, which no longer exists.
+- The spec now reads through `list_applications` and `list_email_events`.
+- Isolation is checked by A's and B's application ids not overlapping.
+- The checks the new tools can't see moved to unit tests: unrelated emails store no sender, subject or snippet (new test), and delete keeps `lastSyncAt` and clears `cursorAt` (existing test).
+- **Side effect:** `npx deepspace agent invoke applytrack records_query`, used to count the user's live records, is gone. Counting now goes through `list_applications` / `list_email_events`, which carry no email content.
+
+**Failures and fixes:**
+- **Unit test expectation:** expected the retry time as 22 h; it was 22 h + 1 s. The test's mistake: the window opens at the first message (T0 + 1 s). Fixed the expectation.
+- **Board spec:** expected two proposal cards after the second message, but got one. Hypothesis: a mocked turn is never saved server-side, so the panel's in-flight overlay is replaced on the next send (`setInFlight([...])`). The test now checks the new card's Confirm instead. That passed, which fits the hypothesis.
+
+**Verified by the agent:**
+- `tsc --noEmit` clean; eslint clean.
+- vitest **76/76** (was 64): new `tools.test.ts` (8), `chat-routes.test.ts` (3), and one more sync test.
+- Playwright **14/14** on fresh local data (was 13): new tool-surface test, and the assistant flow in `board.spec.ts`.
+- **Real model, local, zero-credit "Reviewer Two" with demo data** (throwaway spec, deleted afterwards). The client asked for `claude-opus-5-5`; the server used Haiku.
+  - "Which companies haven't replied in 2 weeks?": 200 in 3.5 s. Called `list_applications` and `list_email_events`, and answered from the dates, noting it can't tell automated replies.
+  - "Move Kestrel Systems to Interview": 200 in 1.9 s. One `propose_status_change`, reply "proposed … you can confirm it below". **Kestrel was still Applied afterwards.**
+- **Measured cost (owner account, `app usage`):** 4 Anthropic calls, 2 per message, $0.00143858 total, so **about $0.0007 per message (0.07 credits)** on demo data: 5 applications, 12 emails. A real inbox, with about 37 applications and 100 emails, sends bigger tool results and will cost more per message. Not measured yet.
+
+**Not verified yet:** the deployed app; a real-Gmail account's cost per message; the panel's look on a phone.

@@ -412,6 +412,26 @@ describe('sync action (Gmail, fake tools)', () => {
     expect(db.syncState.get('alice')?.data.lastSyncAt).toBeTruthy()
   })
 
+  it('stores no sender, subject or snippet for a not-job-related email', async () => {
+    generateObject.mockImplementation(async ({ prompt }: { prompt: string }) => ({
+      object: {
+        results: (JSON.parse(prompt).emails as Array<{ id: string }>).map((e) => ({
+          id: e.id,
+          label: 'not_job_related',
+          company: '',
+          companyAsWritten: '',
+          role: '',
+        })),
+      },
+    }))
+    const { db, tools } = fakeTools([{ messages: [gmailMessage('g1', 'Acme', Date.UTC(2026, 10, 10))] }])
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    const [row] = [...db.emails.values()]
+    expect(row.data).toMatchObject({ userId: 'alice', gmailMessageId: 'g1', classification: 'not_job_related' })
+    expect([row.data.from, row.data.subject, row.data.snippet].every((v) => !v)).toBe(true)
+    expect(db.applications.size).toBe(0)
+  })
+
   it('later syncs query from the stored cursor', async () => {
     modelLabelsAllApplied()
     const { db, gmailCalls, tools } = fakeTools([{ messages: [] }])
