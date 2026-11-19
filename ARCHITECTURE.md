@@ -109,6 +109,7 @@ The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOP
 | `settings` | `admin-schema.ts` | App settings | admin |
 | `applications` | `applications-schema.ts` | One row per user, company and role | member/admin: read own, update own (`status` only); no client create or delete |
 | `emails` | `emails-schema.ts` | Application timeline and sync ledger | member/admin: read own only |
+| `ai-chats`, `ai-messages` | `ai-chat-schema.ts` | Assistant chat history (SDK schemas). Written only by the chat routes | member/admin: read, update and delete own; no client create (admin overridden from the SDK's read-all) |
 | `syncState` | `sync-state-schema.ts` | One row per user (record ID = userId): `lastSyncAt` for the rate limit, `cursorAt` for Gmail, `chatWindowStart` + `chatCount` for the assistant's message limit | member/admin: read own only. Not on `users`, because members can update their own `users` row |
 
 **`applications`**
@@ -301,7 +302,7 @@ It **keeps `syncState.lastSyncAt`**, because deleting it would let a delete-then
 
 ### AI assistant (`src/ai/`, panel on `/board`)
 
-**UI.** **Ask the assistant** on the board opens a side panel with the installer's `ChatPanel` (chat history in `ai-chats` / `ai-messages`, own rows only). The installer's `/assistant` page was removed, and the model picker is hidden (`models={[]}`).
+**UI.** **Ask the assistant** on the board opens a side panel with the installer's `ChatPanel`. Chat history lives in `ai-chats` / `ai-messages`, own rows only, **admin included**: the SDK's schemas let admin read every chat, and `src/schemas/ai-chat-schema.ts` overrides admin with the member rules. That's safe for the chat routes, because the SDK's chat-history helpers run as the app server-side (`X-App-Action`, RBAC off). The installer's `/assistant` page was removed, and the model picker is hidden (`models={[]}`).
 
 **Tools (`src/ai/tools.ts`).** `buildTools` is the whole tool surface, for the in-app chat and the agent HTTP/MCP endpoints alike:
 
@@ -327,7 +328,7 @@ Reads go through the SDK's user executor as the verified caller, so `read: 'own'
 **Tests.**
 - `src/ai/tools.test.ts`: exactly three tools; every executor call is `records.query`; email events never carry sender, subject or snippet; a proposal changes nothing; another user's id is not found; only the four statuses parse.
 - `src/ai/chat-routes.test.ts`: 30 messages pass, the 31st is refused with the right retry time and isn't counted, the window resets after 24 hours, sync's fields survive, users are counted separately.
-- `src/schemas/permissions.test.ts` (existing): a member can't update another user's application, and only `status` is writable.
+- `src/schemas/permissions.test.ts`: a member can't update another user's application, and only `status` is writable. For `ai-chats` and `ai-messages`, another member, an admin, a viewer and a signed-out user can't read Alice's rows, and another member or admin can't update or delete them.
 - `tests/sync-demo.spec.ts`: `GET /_deepspace/agent/browser/tools` and MCP `tools/list` return exactly the three names, and `records_update` is a 404.
 - `tests/board.spec.ts`: with the model mocked by `page.route` on `/api/ai/chat`, a proposal card appears and Kestrel stays in Applied; Cancel changes nothing; Confirm moves it to Interview, and that survives a reload.
 

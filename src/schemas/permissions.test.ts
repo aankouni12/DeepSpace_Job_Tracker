@@ -89,6 +89,34 @@ describe('emails updates', () => {
   })
 })
 
+describe('assistant chats and messages', () => {
+  // Created server-side by the chat routes as the app, owned by Alice.
+  const aliceChat = { createdBy: ALICE, data: { userId: ALICE, title: 'My chat' } }
+  const aliceMessage = { createdBy: ALICE, data: { chatId: 'c1', userId: ALICE, role: 'user', content: 'hi' } }
+
+  for (const name of ['ai-chats', 'ai-messages']) {
+    const schema = schemas.find((s) => s.name === name)!
+    const record = name === 'ai-chats' ? aliceChat : aliceMessage
+
+    it(`${name}: the owner can read; another member or an admin cannot`, () => {
+      expect(schema).toBeDefined()
+      expect(canRead(schema, 'member', record, ALICE)).toBe(true)
+      expect(canRead(schema, 'admin', record, ALICE)).toBe(true)
+      expect(canRead(schema, 'member', record, BOB)).toBe(false)
+      expect(canRead(schema, 'admin', record, BOB)).toBe(false)
+      expect(canRead(schema, 'viewer', record, BOB)).toBe(false)
+      expect(canRead(schema, '*', record, BOB)).toBe(false)
+    })
+
+    it(`${name}: nobody else can change or delete them, admin included`, () => {
+      for (const role of ['member', 'admin']) {
+        expect(canUpdate(schema, role, record, BOB)).toBe(false)
+        expect(canDelete(schema, role, record, BOB)).toBe(false)
+      }
+    })
+  }
+})
+
 describe('syncState updates', () => {
   it('owner cannot reset their own rate limit', () => {
     for (const role of ['member', 'admin']) {

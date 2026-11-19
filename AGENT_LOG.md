@@ -513,4 +513,27 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
   - "Move Kestrel Systems to Interview": 200 in 1.9 s. One `propose_status_change`, reply "proposed … you can confirm it below". **Kestrel was still Applied afterwards.**
 - **Measured cost (owner account, `app usage`):** 4 Anthropic calls, 2 per message, $0.00143858 total, so **about $0.0007 per message (0.07 credits)** on demo data: 5 applications, 12 emails. A real inbox, with about 37 applications and 100 emails, sends bigger tool results and will cost more per message. Not measured yet.
 
+**Security review (`3413d31`):** no findings. One note: the SDK's chat schemas let **admin read every user's chats**.
+
+**User's follow-up before merging:**
+1. Make admin `'own'` on the chat collections, or document why it can't be done.
+2. Permission tests for chats and messages.
+3. Test counts.
+4. Measured cost per message.
+
+**Done:**
+- **Admin restricted.** `src/schemas/ai-chat-schema.ts` now gives admin the member rules on `ai-chats` and `ai-messages`.
+  - This is safe for the chat routes: the SDK's chat helpers (`getChat`, `createChat`, `appendMessage`, `loadMessages`, `updateChat`, `deleteChatCascade`) all go through `executeToolAsApp`, which runs as the app with permissions off (deepspace 0.44.2 `dist/worker.js` 9195–9310). None of them relied on admin rights.
+  - The client's own `useQuery('ai-messages')` reads only the user's own rows.
+- **Permission tests** in `permissions.test.ts`, run for both collections:
+  - The owner can read; another member, an admin, a viewer and a signed-out user can't.
+  - Another member or admin can't update or delete.
+  - Checked that the admin test is meaningful: on the SDK's original schemas, `canRead(admin, someone else's row)` is `true` for both collections.
+- **Tests on fresh local data:** vitest **80/80**, Playwright **14/14**.
+- **Second real-model run** (zero-credit Reviewer Two, demo data; throwaway spec deleted):
+  - "How many rejections this month?": 200 in 3.1 s; 2 calls, **$0.00057**.
+  - "Move Kestrel Systems to Interview": 200 in 2.5 s; 3 calls (`list_applications`, `propose_status_change`, reply), **$0.00093**. Kestrel was still Applied afterwards.
+  - Total for 5 calls: $0.0014963 (owner `app usage`: 69 → 74 calls). **About $0.0007–0.0009 per message on demo data**, consistent with the first run.
+- **Quality note, not fixed:** the rejections answer cited application **ids** instead of company names, because it didn't call `list_applications`. A one-line prompt change would fix it ("name applications by company, never by id"). Left for the user to decide.
+
 **Not verified yet:** the deployed app; a real-Gmail account's cost per message; the panel's look on a phone.
