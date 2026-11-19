@@ -636,5 +636,34 @@ describe('sync action: names, roles and bodies (fake tools)', () => {
     expect(prompts[0].existingApplications).toEqual([])
     expect(prompts[1].existingApplications).toEqual([{ company: 'Acme', role: 'Engineer' }])
   })
+
+  it('a card whose role was filled in keeps getting that role, in the same sync and in later syncs', async () => {
+    scriptModel({
+      'No role': ['applied', 'Acme', 'Acme', ''],
+      'Named role': ['interview', 'Acme', 'Acme', 'Engineer'],
+      'Same role again': ['interview', 'Acme', 'Acme', 'Engineer'],
+      'Decision later': ['rejected', 'Acme', 'Acme', 'Engineer'],
+    })
+    const from = 'Acme <jobs@acme.example>'
+    const { db, tools } = fakeTools([
+      // Sync 1: unspecified card -> role filled in -> same role again.
+      { messages: [msg('a', from, 'No role', 1), msg('b', from, 'Named role', 2), msg('c', from, 'Same role again', 3)] },
+      // Sync 2 (fresh in-memory state, loaded from stored rows): same role once more.
+      { messages: [msg('d', from, 'Decision later', 9)] },
+    ])
+
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    let apps = [...db.applications.values()]
+    expect(apps).toHaveLength(1)
+    // The key never changes; the stored role is filled in.
+    expect(apps[0].data).toMatchObject({ key: 'acme|unspecified role', role: 'Engineer', status: 'interview' })
+
+    db.syncState.get('alice')!.data.lastSyncAt = '2000-01-01T00:00:00.000Z' // past the rate limit
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    apps = [...db.applications.values()]
+    expect(apps).toHaveLength(1)
+    expect(apps[0].data.status).toBe('rejected')
+    expect([...db.emails.values()].every((e) => e.data.applicationId === apps[0].recordId)).toBe(true)
+  })
 })
 
