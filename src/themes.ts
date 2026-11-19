@@ -27,6 +27,11 @@ export const THEMES = [
     label: 'Paper',
     description: 'Light example theme showing the token contract. Replace or delete.',
   },
+  {
+    id: 'applytrack',
+    label: 'applytrack',
+    description: 'Cool ledger light theme with one ink per application status.',
+  },
 ] as const
 
 export type ThemeId = (typeof THEMES)[number]['id']

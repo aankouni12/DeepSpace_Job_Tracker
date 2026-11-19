@@ -6,7 +6,7 @@ applytrack is a job application tracker built on the DeepSpace SDK. It runs as o
 - App id: `app_01M7P97V5G7E91CNSA08EPWQ0F` (immutable; data and secrets key to it)
 - Source: GitHub (`aankouni12/DeepSpace_Job_Tracker`, `main`). This was claimed permanently at the first deploy. Deploys ship the local working tree.
 
-**Status:** `starter` scaffold (deepspace 0.44.2), renamed to applytrack. Data model and server-side sync (Gmail and demo) in place. No board UI yet. Sections marked *planned* describe intent, not code.
+**Status:** `starter` scaffold (deepspace 0.44.2), renamed to applytrack. Data model, sync (Gmail and demo) and the pipeline board are in place. The AI assistant is not built yet. Sections marked *planned* describe intent, not code.
 
 ## Project layout
 
@@ -24,7 +24,14 @@ src/
   schemas.ts               Array of every collection schema (shared by worker and frontend)
   schemas/                 One file per collection (users, settings, applications, emails, syncState) + permissions.test.ts
   pages/                   Routes. Folder determines what a page gets (see below)
+    (app)/home.tsx           Redirects to /board
+    (app)/(protected)/board.tsx     Pipeline board and first-run screen
+    (app)/(protected)/settings.tsx  Account, sign out, "Delete my synced data"
   components/              App components; components/ui/ holds local UI primitives
+    ApplicationCard.tsx      Card, status picker, email timeline dialog
+    SyncControls.tsx         useSync hook (sync, connect, sync on open) and header controls
+  lib/utils.ts             cn, callAction (POST /api/actions/:name with JWT), authedGet
+  themes.css / themes.ts   "applytrack" theme: palette and status inks (--status-*)
   server/
     http-routes.ts         Auth proxy, integrations proxy, files, static/SPA fallback
     realtime-routes.ts     WebSocket routes to Durable Objects, with JWT verification
@@ -169,7 +176,10 @@ The spike on 2026-11-18 showed that a background job **cannot** read a user's Gm
 
 So sync runs inside the user's own request:
 
-1. **Trigger** (*planned*, board feature): the client calls `POST /api/actions/sync` with `{ source: 'gmail' | 'demo' }` and the user's JWT, either from a "Sync now" button or automatically when the board opens and the last sync is more than 24 hours old (*sync on open*). Demo mode uses the same action and skips the Gmail fetch.
+1. **Trigger** (`useSync` in `SyncControls.tsx`): the board calls `POST /api/actions/sync` with `{ source: 'gmail' | 'demo' }` and the user's JWT, through `callAction`. Three things call it:
+   - **Load demo data** / **Try with demo data**;
+   - **Sync Gmail** / **Connect Gmail**, which is the same call. A user without Gmail access gets `requiresOAuth` + `authUrl`, which opens in a new tab. There is no separate auth-URL endpoint (Google OAuth guide).
+   - **Sync on open:** once per page load, when `GET /api/integrations/status` shows `gmailRead` and `syncState.cursorAt` is missing or more than 24 hours old. It uses `cursorAt`, not `lastSyncAt`, so a recent demo sync doesn't suppress the Gmail sync. A `rate_limited` result from an automatic sync is shown silently.
 2. **Rate limit check:** if the `syncState` row (record ID = userId) has `lastSyncAt` within 10 minutes, the action returns `{ success: false, code: 'rate_limited', details: { retryAfterSeconds } }`.
 3. **Fetch:**
    - **Gmail:** `google/gmail-inbox` with the caller's JWT through `tools.integration`, `format: 'metadata'`, paged by `nextPageToken` (50 per page), **at most 100 messages per sync**.
@@ -242,6 +252,26 @@ It **keeps `syncState.lastSyncAt`**, because deleting it would let a delete-then
   If it's run again less than 10 minutes after its own delete step, it skips itself and says so.
 
 **Why not `AppJobRoom`:** job rows live in one app-wide queue (`app:<APP_ID>`). Every member can watch it, and each update sends the whole job (`payload`, `result`, `progressMessage`) to every watcher (deepspace 0.44.2 `dist/worker.js`: 4814, 5226–5240, 5374). Email content in a job would leak to other users. `AppJobRoom` and `AppCronRoom` stay in the scaffold but are unused.
+
+### Board (`/board`)
+
+- **Data:** three live `useQuery` subscriptions, `applications`, `emails` and `syncState`, with no `where`. Each collection's `read: 'own'` rule means the server only sends the caller's rows. As sync writes each batch, cards appear without a reload.
+- **First run:** with no applications and no sync running, the page shows one sentence explaining applytrack and two buttons, **Try with demo data** and **Connect Gmail**, instead of four empty lanes. It's the first thing a reviewer sees.
+- **Lanes:** Applied, Interview, Offer, Rejected. Each has a large count in its status ink.
+- **Cards:**
+  - Company, role, email count and latest date, with the status ink as the left edge. Cards are newest first.
+  - A native `<select>` for status, disabled until `useMutations().ready`. It writes with `put(recordId, { status })`; the schema allows `status` only. A refused write shows a toast.
+  - Clicking a card opens a **timeline dialog**: each linked email's date, label, sender, subject and snippet, newest first. It's for spot-checking classification.
+- **Header:** "Last synced …" from `syncState.lastSyncAt`, the sync buttons, and the result or rate-limit message.
+- **Settings:** **Delete my synced data** opens a confirmation dialog, calls `deleteMyData`, and shows the counts.
+- **Theme:** `data-theme="applytrack"`, a cool light palette with one ink per status (`--status-applied` / `-interview` / `-offer` / `-rejected`). The font is IBM Plex Sans (Google Fonts link in `index.html`).
+- **Tests:** `tests/board.spec.ts` uses its own "Board Reviewer" test account, so it doesn't collide with the sync spec's accounts or rate limits. It checks:
+  - first-run copy and buttons;
+  - demo, giving 3 cards in the right lanes and no `Acme`;
+  - a status change that moves the card and survives a reload;
+  - the timeline showing 3 entries, newest first;
+  - delete from Settings, then first-run again;
+  - **Connect Gmail with Google mocked via `page.route`**: status not connected, then `requiresOAuth`, then a consent tab opens.
 
 ### AI assistant (*planned*)
 

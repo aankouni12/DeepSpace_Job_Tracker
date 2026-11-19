@@ -1,21 +1,37 @@
 /**
- * Example gated page. Reached at /settings — no auth logic lives here
- * because (protected)/_layout.tsx already wraps the subtree in <AuthGate>.
+ * Settings (/settings): account details, sign out, and deleting the user's
+ * synced data (the deleteMyData action, scoped to the caller on the server).
  */
 
+import { useState } from 'react'
 import { signOut, useUser } from 'deepspace'
-import { Button } from '@/components/ui'
+import { Button, ConfirmModal } from '@/components/ui'
+import { callAction } from '@/lib/utils'
 
 export default function SettingsPage() {
   const { user } = useUser()
+  const [confirming, setConfirming] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [result, setResult] = useState<string | null>(null)
+
+  const deleteData = async () => {
+    setDeleting(true)
+    const r = await callAction<{ deleted: { emails: number; applications: number } }>('deleteMyData')
+    setDeleting(false)
+    setConfirming(false)
+    setResult(
+      r.success
+        ? `Deleted ${r.data.deleted.applications} applications and ${r.data.deleted.emails} emails.`
+        : r.error,
+    )
+  }
 
   return (
     // No background on page wrappers — pages render into whatever the app's
-    // (app)/_layout provides (a plain background, or a raised panel), so they
-    // stay transparent and inherit it.
+    // (app)/_layout provides, so they stay transparent and inherit it.
     <div className="min-h-full text-foreground">
-      <div className="mx-auto max-w-2xl px-6 py-20">
-        <h1 className="mb-12 text-4xl font-bold tracking-tight">Settings</h1>
+      <div className="mx-auto max-w-2xl space-y-6 px-6 py-20">
+        <h1 className="mb-6 text-4xl font-semibold tracking-tight">Settings</h1>
 
         <section className="rounded-lg border border-border bg-card p-6">
           <h2 className="mb-4 text-lg font-semibold">Your account</h2>
@@ -35,7 +51,33 @@ export default function SettingsPage() {
             Sign out
           </Button>
         </section>
+
+        <section className="rounded-lg border border-border bg-card p-6">
+          <h2 className="mb-2 text-lg font-semibold">Synced data</h2>
+          <p className="text-sm text-muted-foreground">
+            Delete the applications and emails applytrack has saved for you, including demo data.
+            Your next Gmail sync starts from the last 60 days again.
+          </p>
+          <Button variant="destructive" className="mt-4" onClick={() => setConfirming(true)}>
+            Delete my synced data
+          </Button>
+          {result && (
+            <p className="mt-3 text-sm" role="status" data-testid="delete-result">
+              {result}
+            </p>
+          )}
+        </section>
       </div>
+
+      <ConfirmModal
+        open={confirming}
+        onClose={() => setConfirming(false)}
+        onConfirm={deleteData}
+        loading={deleting}
+        title="Delete your synced data?"
+        description="This removes every application and email applytrack has saved for you. It can't be undone."
+        confirmText="Delete my synced data"
+      />
     </div>
   )
 }

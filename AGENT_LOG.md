@@ -307,3 +307,52 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - **Not tested here:** the real Gmail path, which is the user's manual test after deploy.
 
 **Known limitation (user-requested note):** snippets are about 200 characters and can cut off the meaning. "We have decided to move forward with…" could be good news or a rejection. **Next step, not built:** fetch the full body (`gmail-get`) only for ambiguous matches.
+
+**Verified on production: ** deleted my data, re-synced real Gmail. 100 emails, 46 applications, 0 failed batches. Model labels: 44 applied, 10 interview, 10 rejected, 36 not job related. 4 rejected by the grounding check.
+
+**Agent's follow-up (counts only, no names):**
+- The 46 applications cover **29 distinct companies**: 7 companies have 2 applications, 2 have 4, and 1 has 5. 7 applications have "Unspecified role".
+- Applications by status: applied 30, interview 6, rejected 10.
+- **Likely cause:** applications split by role (a missing role, differently worded role names, or real separate roles). Needs the user's spot-check.
+- **The 10 "interview" labels** may come from the agent's own prompt, which counts assessment and coding-challenge invitations as `interview`.
+- The cursor advanced (0 failed batches). The ~175 outbound calls of a 100-message sync worked without error.
+- The agent's first count of email rows (49) was wrong: the records tool caps one response at about 30 KB, and the one-off script read a single page. The sync itself pages correctly.
+
+---
+
+## 2026-11-18: Feature 4, pipeline board (`feature/board`)
+
+**Asked:**
+- The board as planned: live lanes, a status dropdown, card timelines, Sync/Connect/Load demo with a syncing state, sync on open, and Delete in Settings.
+- **User addition:** a first-run screen for users with no applications: one sentence plus two prominent buttons, **Try with demo data** and **Connect Gmail**. It must be in the board spec.
+- **Deferred by the user until after their spot-check**, into one small accuracy branch:
+  - attach "Unspecified role" emails to the company's single existing application;
+  - the assessment definition;
+  - sync never moving a status backward (applied < interview < offer; rejected allowed any time), so manual changes aren't undone.
+
+**Built:**
+- `src/pages/(app)/(protected)/board.tsx`: lanes, first-run screen.
+- `src/components/ApplicationCard.tsx`: card, native status `<select>`, timeline dialog.
+- `src/components/SyncControls.tsx`:
+  - the `useSync` hook. Connect is the same `sync` call, which returns `requiresOAuth`.
+  - sync on open, keyed on `cursorAt` so demo syncs don't suppress it;
+  - rate-limit and result messages.
+- `src/lib/utils.ts`: `callAction` and `authedGet`. The web SDK has no action client, only `integration.*`.
+- `/home` redirects to `/board`; nav shows "Board".
+- Settings has **Delete my synced data** with a confirmation dialog.
+- `applytrack` theme (`themes.css`, `themes.ts`, `index.html`): cool light palette, status inks, IBM Plex Sans.
+  - The design went through the frontend-design skill's plan-and-review step. A first idea (near-black with one accent) was dropped as a generic default.
+- **Third test account `board@deepspace.test` ("Board Reviewer")**, not in the approved plan. The sync spec leaves its two accounts rate-limited or holding data, so the board spec needed its own account to avoid collisions. Its password is only in `~/.deepspace/test-accounts.json`.
+
+**Problems found and fixed (all in the test, not the app):**
+1. `getByText('Northwind Robotics')` also matched the card's screen-reader label "Status for Northwind Robotics". Fixed with exact matching.
+2. The Cedar Labs card showed **"Cedar Labs Inc."**: the display name comes from the first email that created the application. Both emails were correctly merged (2 emails on the card). The test now accepts either form.
+3. The mocked consent URL didn't resolve, so Chrome showed its error page. Fixed by mocking the consent page too.
+4. The first timeline screenshot looked see-through: it was taken during the dialog's 200 ms fade-in. The test now waits for opacity 1, and the panel is solid.
+
+**Verified:**
+- `tsc` and `eslint` clean.
+- vitest **40/40**.
+- `tests/board.spec.ts` **1/1**: first-run copy and both buttons, then demo, giving exactly 3 cards in the right lanes and no "Acme"; a status change that moves the card and survives a reload; Northwind's timeline with 3 entries, newest Offer first; delete from Settings showing "Deleted 3 applications and 10 emails." and then first-run; Connect Gmail with `page.route` mocks opening the consent tab.
+- **Full suite on fresh local data: 13/13 Playwright** (board, sync-demo, collab, smoke, api) plus 40/40 unit tests.
+- Screenshots of the first-run screen, the board and the timeline were reviewed by the agent.

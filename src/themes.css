@@ -44,3 +44,41 @@
   --color-shell: #fafafa;
   --color-shell-panel: #ffffff;
 }
+
+/* applytrack: cool ledger light theme. Status inks are used for lane counts
+ * and the left edge of each card (src/components/ApplicationCard.tsx). */
+[data-theme="applytrack"] {
+  color-scheme: light;
+  --color-background: #f4f6f5;
+  --color-foreground: #1b2420;
+  --color-card: #ffffff;
+  --color-card-foreground: #1b2420;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #1b2420;
+  --color-primary: #1b2420;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #e8edea;
+  --color-secondary-foreground: #1b2420;
+  --color-muted: #e8edea;
+  --color-muted-foreground: #56615c;
+  --color-accent: #e3e9e6;
+  --color-accent-foreground: #1b2420;
+  --color-destructive: #b42318;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #dce2df;
+  --color-input: #cfd7d3;
+  --color-ring: #3352c4;
+  --radius: 0.375rem;
+  --shadow-card: none;
+  --shadow-card-hover: none;
+  --color-shell: #f4f6f5;
+  --color-shell-panel: #ffffff;
+  --status-applied: #3352c4;
+  --status-interview: #b97c06;
+  --status-offer: #1e8657;
+  --status-rejected: #8b9590;
+}
+
+[data-theme="applytrack"] body {
+  font-family: 'IBM Plex Sans', 'Segoe UI', Roboto, sans-serif;
+}
