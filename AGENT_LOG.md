@@ -356,3 +356,5 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - `tests/board.spec.ts` **1/1**: first-run copy and both buttons, then demo, giving exactly 3 cards in the right lanes and no "Acme"; a status change that moves the card and survives a reload; Northwind's timeline with 3 entries, newest Offer first; delete from Settings showing "Deleted 3 applications and 10 emails." and then first-run; Connect Gmail with `page.route` mocks opening the consent tab.
 - **Full suite on fresh local data: 13/13 Playwright** (board, sync-demo, collab, smoke, api) plus 40/40 unit tests.
 - Screenshots of the first-run screen, the board and the timeline were reviewed by the agent.
+
+**Polish for later (user request):** self-host the IBM Plex Sans font instead of loading it from Google Fonts. The security review flagged the third-party request as a privacy and dependency note, not a vulnerability.
