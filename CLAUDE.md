@@ -50,6 +50,7 @@ Use one feature branch per feature. Commit on the branch, run /security-review a
 Sync and demo jobs set userId only from the verified user who enqueued the job, never from email content or request bodies.
 Never set ALLOW_DEBUG_ROUTES on the deployed app.
 Never deploy unless main is pushed and matches origin/main. If a push fails, stop and ask.
+Pushes don't work from the agent's session. Workflow: the agent commits (and merges locally), the user pushes. The agent never tries to push or work around it.
 Docs to keep updated
 ARCHITECTURE.md: components, data model, and data flow. Update after every feature.
 AGENT_LOG.md: what I asked for, what you built, what I changed or rejected. Add an entry after every task.

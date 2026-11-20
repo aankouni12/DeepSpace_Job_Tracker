@@ -616,7 +616,7 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - **Caps:** `maxOutputTokens: 500`, `maxToolCalls: 4`, and `contextBudget: 30_000`. They live in `assistantStreamSettings()`, which both the route and the tests use.
 - **App-wide limit:** a new closed collection `appUsage`, one row per UTC day. `claimChatMessage` now checks both limits, counts nothing on a refusal, and returns `scope: 'user' | 'app'` so the 429 says which limit was hit.
 - **Stale proposals:** `proposedAt` on each proposal, `proposal-state.ts`, and `NewestProposalsContext` from `ChatPanel` to the cards.
-- **Caught and reverted by the agent:** it had also added "name applications by company, never by id" to the prompt, which the user hadn't approved. The line was taken out before committing; that fix is still open.
+- **Agent mistake, caught by the agent:** it added "Name applications by company and role, never by id." to the system prompt **without approval**. The user had only been told about this fix as an option. The agent noticed, removed the line before committing, and reported it. The user then approved it, and it was added back in a follow-up commit on this branch.
 
 **Failures and fixes along the way:**
 1. **`tools.test`** expected the old proposal shape. Updated for `proposedAt`.
@@ -654,3 +654,5 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 Plus at most one summarizer call per message once history passes 30,000 characters.
 
 **Typical:** at the measured $0.0005 per message, 200 messages a day is about $0.10.
+
+**Push test:** the branch's first push from the agent's session failed (`could not read Username for 'https://github.com'`). Per the rule, the agent stopped and asked; the user pushed. New workflow, added to CLAUDE.md → Security: **the agent commits and merges locally, and the user pushes.**
