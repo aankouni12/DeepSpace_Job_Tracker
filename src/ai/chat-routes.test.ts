@@ -12,9 +12,11 @@ import {
   ASSISTANT_MAX_OUTPUT_TOKENS,
   ASSISTANT_MAX_TOOL_CALLS,
   CHAT_DAILY_LIMIT,
+  SHORTENED_NOTE,
   assistantStreamSettings,
   claimChatMessage,
   limitMessage,
+  markShortened,
 } from './chat-routes'
 
 const HOUR = 60 * 60 * 1000
@@ -141,12 +143,12 @@ async function runAssistant(reply: string, stopReason?: string) {
 }
 
 describe('assistant model settings (real SDK call, fake network)', () => {
-  it('sends the 500-token output cap, Haiku, and owner billing to the model', async () => {
+  it('sends the 1,500-token output cap, Haiku, and owner billing to the model', async () => {
     const { url, body, headers } = await runAssistant('ok')
     expect(url).toContain('/api/proxy/anthropic/v1/messages')
     expect(body.model).toBe('claude-haiku-5-5')
     expect(body.max_tokens).toBe(ASSISTANT_MAX_OUTPUT_TOKENS)
-    expect(ASSISTANT_MAX_OUTPUT_TOKENS).toBe(500)
+    expect(ASSISTANT_MAX_OUTPUT_TOKENS).toBe(1500)
     // The proxy bills the X-Auth-Token subject: the owner's JWT, not the caller's.
     expect(headers.get('x-auth-token')).toBe('owner-jwt')
   })
@@ -163,6 +165,57 @@ describe('assistant model settings (real SDK call, fake network)', () => {
   it('a reply cut off at the cap still ends the turn cleanly', async () => {
     const { text } = await runAssistant('Partial answer', 'max_tokens')
     expect(text).toBe('Partial answer')
+  })
+})
+
+describe('markShortened: "(reply shortened)" instead of a sentence that just stops', () => {
+  async function through(parts: Array<{ type: string } & Record<string, unknown>>) {
+    const out: Record<string, unknown>[] = []
+    const source = new ReadableStream<{ type: string }>({
+      start: (c) => {
+        parts.forEach((p) => c.enqueue(p))
+        c.close()
+      },
+    })
+    const stream = markShortened(source)
+    for await (const part of stream as unknown as AsyncIterable<Record<string, unknown>>) out.push(part)
+    return out
+  }
+  const step = (finishReason: string) => [
+    { type: 'text-start', id: 't' },
+    { type: 'text-delta', id: 't', text: 'A p' },
+    { type: 'text-end', id: 't' },
+    { type: 'finish-step', finishReason },
+    { type: 'finish', finishReason },
+  ]
+
+  it('adds the note before the finish-step of a step cut off by the cap', async () => {
+    const out = await through(step('length'))
+    expect(out.map((p) => p.type)).toEqual([
+      'text-start', 'text-delta', 'text-end', 'text-start', 'text-delta', 'text-end', 'finish-step', 'finish',
+    ])
+    expect(out[4]).toMatchObject({ type: 'text-delta', text: `\n\n${SHORTENED_NOTE}` })
+  })
+
+  it('leaves a reply that finished normally unchanged', async () => {
+    const parts = step('stop')
+    expect(await through(parts)).toEqual(parts)
+  })
+})
+
+describe('the shortened note reaches the client as text (real SDK call, fake network)', () => {
+  it('shows "(reply shortened)" when the model stops at max_tokens', async () => {
+    const fetchFn = vi.fn(async () => new Response(anthropicReply('A p', 'max_tokens'), { headers: { 'Content-Type': 'text/event-stream' } }))
+    const env = { API_WORKER: { fetch: fetchFn }, APP_OWNER_JWT: 'owner-jwt', DEEPSPACE_APP_ID: 'app-test' }
+    const { result } = streamDeepSpaceAgent(env as never, {
+      ...assistantStreamSettings(new Date(T0)),
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    let text = ''
+    for await (const part of markShortened(result.stream as unknown as ReadableStream<{ type: string }>) as unknown as AsyncIterable<{ type: string; text?: string }>) {
+      if (part.type === 'text-delta') text += part.text
+    }
+    expect(text).toBe(`A p\n\n${SHORTENED_NOTE}`)
   })
 
   it('uses 4 tool calls and a 30,000-character history budget', () => {

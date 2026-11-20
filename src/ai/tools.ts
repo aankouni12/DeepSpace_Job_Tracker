@@ -89,7 +89,7 @@ export function buildSystemPrompt(now: Date): string {
     'itself: the user sees a Confirm button. Never say a status was changed; say you proposed it and',
     'they can confirm below.',
     '',
-    'Keep answers short (they are cut off after about 300 words). Use lists for more than three items.',
+    'Keep answers short, under about 200 words. Use lists for more than three items.',
     'Name applications by company and role, never by id.',
   ].join('\n')
 }

@@ -28,7 +28,8 @@ export default defineConfig({
   },
   test: {
     // Unit tests only; tests/*.spec.ts are Playwright suites run separately.
-    include: ['prerender.test.ts', 'src/**/*.{test,spec}.{ts,tsx}'],
+    // assistant.model.test.ts calls the real model and skips itself unless RUN_MODEL_TESTS=1.
+    include: ['prerender.test.ts', 'assistant.model.test.ts', 'src/**/*.{test,spec}.{ts,tsx}'],
     environment: 'node',
   },
 })

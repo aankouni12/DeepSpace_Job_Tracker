@@ -55,8 +55,39 @@ function recordRoomStub(env: Env): DurableObjectStub {
 // modelId is ignored) and bounds every cost driver of a message.
 const ASSISTANT_MODEL = 'claude-haiku-5-5'
 const MAX_USER_CONTENT_LENGTH = 2_000
-/** Per model call (the SDK default is 64,000). A message makes at most MAX_TOOL_CALLS + 1 calls. */
-export const ASSISTANT_MAX_OUTPUT_TOKENS = 500
+/**
+ * Per model call (the SDK default is 64,000). A message makes at most
+ * MAX_TOOL_CALLS + 1 calls. Haiku 5.5's hidden thinking counts against this
+ * too, and the DeepSpace agent stream doesn't let callers turn thinking off
+ * (no providerOptions/reasoning) or budget it separately, so this leaves room
+ * for thinking plus a full answer. 500 cut replies off (2026-11-19).
+ */
+export const ASSISTANT_MAX_OUTPUT_TOKENS = 1500
+/** Appended when a reply still hits the cap, instead of a sentence that just stops. */
+export const SHORTENED_NOTE = '(reply shortened)'
+
+type StreamPart = { type: string; finishReason?: string }
+
+/** Adds SHORTENED_NOTE as text before the finish-step of a step cut off by the token cap. */
+export function markShortened<T extends StreamPart>(stream: ReadableStream<T>): ReadableStream<T> {
+  return stream.pipeThrough(
+    new TransformStream<T, T>({
+      transform(part, controller) {
+        if (part.type === 'finish-step' && part.finishReason === 'length') {
+          const id = 'reply-shortened'
+          for (const extra of [
+            { type: 'text-start', id },
+            { type: 'text-delta', id, text: `\n\n${SHORTENED_NOTE}` },
+            { type: 'text-end', id },
+          ]) {
+            controller.enqueue(extra as unknown as T)
+          }
+        }
+        controller.enqueue(part)
+      },
+    }),
+  )
+}
 export const ASSISTANT_MAX_TOOL_CALLS = 4
 /** History over 30,000 characters is summarized (SDK default 240,000). */
 export const ASSISTANT_CONTEXT_CONFIG = { ...DEFAULT_CONTEXT_CONFIG, contextBudget: 30_000 }
@@ -354,8 +385,15 @@ export function registerAiChatRoutes(
     // Save the finished turn: every step's messages (tool calls included), not
     // just the final step's. Called on normal completion and when the request
     // is aborted after at least one step completed.
-    const persistTurn = async (text: string, responseMessages: ModelMessage[]): Promise<void> => {
+    const persistTurn = async (
+      rawText: string,
+      responseMessages: ModelMessage[],
+      shortened = false,
+    ): Promise<void> => {
       const parts = buildUiParts(responseMessages)
+      // Keep the "(reply shortened)" note after a reload, as the stream showed it.
+      if (shortened) parts.push({ type: 'text', text: SHORTENED_NOTE } as (typeof parts)[number])
+      const text = shortened ? `${rawText}\n\n${SHORTENED_NOTE}` : rawText
       if (text.trim() === '' && parts.length === 0) {
         console.warn('[ai-chat] FINISH empty turn, skipping persist')
         return
@@ -443,7 +481,8 @@ export function registerAiChatRoutes(
           `[ai-chat] stream error: ${deepSpaceAgentErrorSummary(error, diagnosticContext)}`,
         )
       },
-      onEnd: ({ text, responseMessages }) => persistTurn(text, responseMessages as ModelMessage[]),
+      onEnd: ({ text, responseMessages, finishReason }) =>
+        persistTurn(text, responseMessages as ModelMessage[], finishReason === 'length'),
       // AI SDK skips `onEnd` on abort; keep the steps that did complete.
       onAbort: ({ steps }) => {
         const last = steps.at(-1)
@@ -460,7 +499,7 @@ export function registerAiChatRoutes(
         'X-Asst-Id': asstId,
       },
       stream: toUIMessageStream({
-        stream: result.stream,
+        stream: markShortened(result.stream),
         // Reasoning models (o-series, Claude with extended thinking) emit
         // `reasoning-start`/`reasoning-delta`/`reasoning-end` chunks. We
         // don't render them today — pass them through and the user sees a

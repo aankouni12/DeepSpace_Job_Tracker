@@ -656,3 +656,53 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 **Typical:** at the measured $0.0005 per message, 200 messages a day is about $0.10.
 
 **Push test:** the branch's first push from the agent's session failed (`could not read Username for 'https://github.com'`). Per the rule, the agent stopped and asked; the user pushed. New workflow, added to CLAUDE.md → Security: **the agent commits and merges locally, and the user pushes.**
+
+**Deployed:**
+- The user pushed `main` @ `2e83ba1`. The agent confirmed `main` = `origin/main` and deployed from PowerShell at `C:\`.
+- The live bundle has a single SDK copy (no `dist-*` chunk).
+- `tests/assistant.live.ts` passed; signed out, the endpoints return 401.
+
+---
+
+## 2026-11-20: Bug: assistant replies cut off mid-sentence (branch `fix/assistant-truncation`)
+
+**Reported by the user (live):** replies were cut off mid-sentence, even short ones (~60 words). The rejected-companies list stopped mid-entry, and a two-sentence answer stopped at "A p".
+- **User's hypothesis:** hidden reasoning tokens count against `maxOutputTokens: 500`.
+- **Asked:** confirm it with the finish reason and usage; fix it (raise the cap, set a reasoning budget, or turn reasoning off) with the tradeoff and new worst case; show "(reply shortened)" instead of a sentence that just stops; add a test with a long real answer.
+
+**User's re-sync (not done by the agent):** the user re-synced their account. The assistant now lists **12 rejected applications**, including Valeo, Little Caesars, Magna and Point C. The user confirmed they are all real rejections. The user's message was cut off at "I [confirmed they're all real rejections", and the agent logged it with that reading.
+
+**Investigation** (real model, route settings and tools, fictional data of 30 applications with 12 rejected and 100 email events; `assistant.model.test.ts`):
+- **Easy question** ("which companies rejected me?"): finish `stop` both times. But the answers used 324 and 238 output tokens for about 160 and 120 tokens of visible text.
+- **The SDK's `reasoningTokens` was 0.** Anthropic reports thinking inside `output_tokens`, so that 0 is misleading.
+- **Heavier questions at 500:** **4 of 6 replies ended with `finishReason: length` at exactly 500 tokens**, each with a hidden reasoning part. Two had **0 visible words**: all 500 tokens went to thinking. Two stopped after about 125 tokens of text, so about 375 went to thinking. **Hypothesis confirmed.**
+
+**The three options:**
+- **Turn reasoning off:** cleanest, but not available through the platform. Haiku 5.5 accepts disabled thinking at low effort, but `streamDeepSpaceAgent` doesn't let callers pass `providerOptions`/`reasoning`, and `effort` is already at the lowest level, `low`. It would mean bypassing the platform's agent stream with custom code, which needs the user's approval.
+- **A separate reasoning budget:** not possible; Haiku 5.5 rejects `budget_tokens` with a 400.
+- **Raise the cap: chosen.**
+
+**Fix:**
+- `ASSISTANT_MAX_OUTPUT_TOKENS` 500 → **1500**.
+- Any reply that still hits the cap gets "(reply shortened)" (`markShortened` in the stream; `persistTurn` saves it).
+- The prompt now says "under about 200 words" instead of claiming answers are cut off after about 300 words.
+
+**Measured at 1,500:**
+- 18 real-model replies, all finished with `stop`: the 6 heavier questions, 6 more of the heaviest question, the 2 tests, and 4 earlier easy runs.
+- The heaviest question used up to **1,368** of 1,500 tokens, so the headroom is real but thin. The shortened note covers any reply that still hits the cap.
+- **Cost:** the final two tests made 4 calls for $0.002436, **about $0.0012 per message** on 30 applications and 100 email events. That's up from about $0.0005 on demo data, because both the data and the answers are larger.
+
+**New worst case (an estimate, not measured).** Same method and published Haiku 5.5 price as the 2026-11-19 entry. Only the output side changes: 1,500 × $0.50 per million = $0.00075 per call, up from $0.00025.
+
+| | Per model call | Per message (5 calls) | Per user per day (30) | App-wide per day (200) |
+|---|---|---|---|---|
+| This app's real tool sizes | ≈ $0.0028 | ≈ $0.014 | ≈ $0.41 | ≈ **$2.75** (was $2.30) |
+| SDK ceiling | ≈ $0.0048 | ≈ $0.024 | ≈ $0.71 | ≈ **$4.75** (was $4.30) |
+
+**Tests:**
+- **Unit:** `markShortened` adds the note only on `length`. Through the real SDK call with a faked network, a reply stopped at `max_tokens` reaches the client as "A p" plus "(reply shortened)". The captured request has `max_tokens: 1500`.
+- **Real model** (`assistant.model.test.ts`, skipped unless `RUN_MODEL_TESTS=1`): all 12 rejected companies listed, finish `stop`, no note; and the heaviest follow-up answered in full. Both pass.
+
+**Why the agent's local measurements missed this:** the real-model checks on 2026-11-19 used demo data (5 applications) and short questions. Those answers were 19 to 73 words, small enough that thinking plus text fit under 500 tokens. The agent checked that answers arrived, but not their finish reason or output token count. And nothing tested a longer answer on inbox-sized data until the user hit it live. The new real-model test covers both.
+
+**Verified by the agent:** `tsc` and eslint are clean; vitest 97/97 (plus 2 real-model tests skipped by default, run and passing with `RUN_MODEL_TESTS=1`). Playwright 14/14 on fresh local data.
