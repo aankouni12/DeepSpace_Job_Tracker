@@ -60,9 +60,10 @@ const MAX_USER_CONTENT_LENGTH = 2_000
  * MAX_TOOL_CALLS + 1 calls. Haiku 5.5's hidden thinking counts against this
  * too, and the DeepSpace agent stream doesn't let callers turn thinking off
  * (no providerOptions/reasoning) or budget it separately, so this leaves room
- * for thinking plus a full answer. 500 cut replies off (2026-11-19).
+ * for thinking plus a full answer. 500 cut replies off (2026-11-19); the
+ * heaviest question tested used 1,368, so 2,000 leaves real headroom.
  */
-export const ASSISTANT_MAX_OUTPUT_TOKENS = 1500
+export const ASSISTANT_MAX_OUTPUT_TOKENS = 2000
 /** Appended when a reply still hits the cap, instead of a sentence that just stops. */
 export const SHORTENED_NOTE = '(reply shortened)'
 

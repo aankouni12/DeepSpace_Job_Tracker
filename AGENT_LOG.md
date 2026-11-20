@@ -683,24 +683,24 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 - **Raise the cap: chosen.**
 
 **Fix:**
-- `ASSISTANT_MAX_OUTPUT_TOKENS` 500 → **1500**.
+- `ASSISTANT_MAX_OUTPUT_TOKENS` 500 → **2000**. The agent proposed 1,500. The user raised it to 2,000 on approval, because 1,368 of 1,500 left too little room, and normal cost follows actual usage, so a higher cap mainly moves the worst case.
 - Any reply that still hits the cap gets "(reply shortened)" (`markShortened` in the stream; `persistTurn` saves it).
 - The prompt now says "under about 200 words" instead of claiming answers are cut off after about 300 words.
 
-**Measured at 1,500:**
+**Measured at a cap of 1,500** (before the user's change to 2,000; with more room, a higher cap can't cut off a reply that finished at 1,500):
 - 18 real-model replies, all finished with `stop`: the 6 heavier questions, 6 more of the heaviest question, the 2 tests, and 4 earlier easy runs.
-- The heaviest question used up to **1,368** of 1,500 tokens, so the headroom is real but thin. The shortened note covers any reply that still hits the cap.
+- The heaviest question used up to **1,368** tokens. The shortened note covers any reply that still hits the cap.
 - **Cost:** the final two tests made 4 calls for $0.002436, **about $0.0012 per message** on 30 applications and 100 email events. That's up from about $0.0005 on demo data, because both the data and the answers are larger.
 
-**New worst case (an estimate, not measured).** Same method and published Haiku 5.5 price as the 2026-11-19 entry. Only the output side changes: 1,500 × $0.50 per million = $0.00075 per call, up from $0.00025.
+**New worst case at 2,000 (an estimate, not measured).** Same method and published Haiku 5.5 price as the 2026-11-19 entry. Only the output side changes: 2,000 × $0.50 per million = $0.001 per call, up from $0.00025.
 
 | | Per model call | Per message (5 calls) | Per user per day (30) | App-wide per day (200) |
 |---|---|---|---|---|
-| This app's real tool sizes | ≈ $0.0028 | ≈ $0.014 | ≈ $0.41 | ≈ **$2.75** (was $2.30) |
-| SDK ceiling | ≈ $0.0048 | ≈ $0.024 | ≈ $0.71 | ≈ **$4.75** (was $4.30) |
+| This app's real tool sizes | ≈ $0.003 | ≈ $0.015 | ≈ $0.45 | ≈ **$3.00** (was $2.30) |
+| SDK ceiling | ≈ $0.005 | ≈ $0.025 | ≈ $0.75 | ≈ **$5.00** (was $4.30) |
 
 **Tests:**
-- **Unit:** `markShortened` adds the note only on `length`. Through the real SDK call with a faked network, a reply stopped at `max_tokens` reaches the client as "A p" plus "(reply shortened)". The captured request has `max_tokens: 1500`.
+- **Unit:** `markShortened` adds the note only on `length`. Through the real SDK call with a faked network, a reply stopped at `max_tokens` reaches the client as "A p" plus "(reply shortened)". The captured request has `max_tokens: 2000`.
 - **Real model** (`assistant.model.test.ts`, skipped unless `RUN_MODEL_TESTS=1`): all 12 rejected companies listed, finish `stop`, no note; and the heaviest follow-up answered in full. Both pass.
 
 **Why the agent's local measurements missed this:** the real-model checks on 2026-11-19 used demo data (5 applications) and short questions. Those answers were 19 to 73 words, small enough that thinking plus text fit under 500 tokens. The agent checked that answers arrived, but not their finish reason or output token count. And nothing tested a longer answer on inbox-sized data until the user hit it live. The new real-model test covers both.

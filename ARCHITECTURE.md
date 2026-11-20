@@ -331,10 +331,11 @@ Reads go through the SDK's user executor as the verified caller, so `read: 'own'
 - **Per-message bounds**, all in `assistantStreamSettings()` and the constants above it:
   - The server always uses `claude-haiku-5-5` at `effort: 'low'`. The client's `modelId` is ignored.
   - At most **4 tool calls**, so at most 5 model calls per message.
-  - **`maxOutputTokens: 1500`** per model call (the SDK default is 64,000). Haiku 5.5's hidden thinking counts against it.
+  - **`maxOutputTokens: 2000`** per model call (the SDK default is 64,000). Haiku 5.5's hidden thinking counts against it.
     - At 500, thinking used most of the budget and replies were cut off mid-sentence.
     - `streamDeepSpaceAgent` doesn't let callers turn thinking off or budget it separately (no `providerOptions`/`reasoning`), and `effort` is already `low`. So the cap leaves room for thinking plus a full answer.
-    - In testing, the heaviest question used up to 1,368 tokens.
+    - In testing, the heaviest question used up to 1,368 tokens. 1,500 left too little room, so the user set 2,000.
+    - Billing follows actual tokens, so the cap mainly moves the worst case.
   - **If a reply still hits the cap,** `markShortened` adds "(reply shortened)" to the stream before that step's `finish-step`, and `persistTurn` saves the same note. The user never sees a sentence that just stops, even after a reload.
   - A 2,000-character cap on the user's message.
   - **`contextBudget: 30_000`** characters of history (`ASSISTANT_CONTEXT_CONFIG`; the SDK default is 240,000). Older history gets summarized, which is one extra owner-billed call when it happens.
@@ -344,14 +345,14 @@ Reads go through the SDK's user executor as the verified caller, so `read: 'own'
   - **App-wide:** 200 messages per UTC day across all accounts (`APP_DAILY_LIMIT`), on the closed `appUsage` row. It's a circuit breaker against many accounts. **To change it, edit the one constant `APP_DAILY_LIMIT` in `src/ai/chat-routes.ts`.**
   - The refusal says which limit was hit.
   - Same accepted race as sync: requests in the same instant can slip a few messages past a cap.
-- **Cost:** measured about $0.0005 per message on demo data, and about $0.0012 on a larger fictional dataset after the cap went to 1,500. Worst-case bounds are in AGENT_LOG.md (2026-11-20, truncated replies).
+- **Cost:** measured about $0.0005 per message on demo data, and about $0.0012 on a larger fictional dataset with the higher cap. Worst-case bounds are in AGENT_LOG.md (2026-11-20, truncated replies).
 
 **Tests.**
 - `src/ai/tools.test.ts`: exactly three tools; every executor call is `records.query`; email events never carry sender, subject or snippet; a proposal changes nothing; another user's id is not found; only the four statuses parse.
 - `src/ai/chat-routes.test.ts`:
   - **Per user:** the 31st message is refused with the right retry time and doesn't count; the window resets after 24 hours; sync's fields survive.
   - **App-wide:** the 201st message of a UTC day is refused for everyone without counting the user; the next UTC day starts a new row; the refusal text names the limit.
-  - **Real SDK call with a fake `API_WORKER` binding:** the request to the model has `max_tokens: 1500`, `claude-haiku-5-5`, the owner's token in `X-Auth-Token`, and the scope rule in `system`. A mocked refusal reaches the user unchanged. A reply stopped at `max_tokens` reaches the client as "A p" plus "(reply shortened)". Also checks 4 tool calls and the 30,000-character budget.
+  - **Real SDK call with a fake `API_WORKER` binding:** the request to the model has `max_tokens: 2000`, `claude-haiku-5-5`, the owner's token in `X-Auth-Token`, and the scope rule in `system`. A mocked refusal reaches the user unchanged. A reply stopped at `max_tokens` reaches the client as "A p" plus "(reply shortened)". Also checks 4 tool calls and the 30,000-character budget.
   - `markShortened` adds the note only for a step that ended with `length` and leaves normal replies unchanged.
 - `assistant.model.test.ts` (repo root; **real model, owner-billed, skipped unless `RUN_MODEL_TESTS=1`**): the route's real settings and tools on fictional data (30 applications, 12 rejected). It checks that the reply lists all 12 rejected companies with finish reason `stop` and no shortened note, and that the heaviest follow-up question is answered in full. It reads the API worker credentials from the generated `.dev.vars` and never prints them.
 - `src/components/proposal-state.test.ts`: proposals are active, replaced, expired after 10 minutes, or expired when they have no timestamp; the newest proposal per application is picked across messages.

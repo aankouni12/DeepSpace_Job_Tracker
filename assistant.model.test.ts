@@ -90,7 +90,7 @@ describe.skipIf(!RUN)('assistant against the real model', () => {
     expect(text).not.toContain('(reply shortened)')
   }, 120_000)
 
-  // The question that thinks the most (up to ~1,370 of 1,500 tokens in testing).
+  // The question that thinks the most (up to 1,368 output tokens in testing; the cap is 2,000).
   it('answers a follow-up question in full, thinking included', async () => {
     const { text, steps } = await ask(
       "Which companies haven't replied in 2 weeks, and which should I follow up with first? Explain briefly.",

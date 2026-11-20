@@ -143,12 +143,12 @@ async function runAssistant(reply: string, stopReason?: string) {
 }
 
 describe('assistant model settings (real SDK call, fake network)', () => {
-  it('sends the 1,500-token output cap, Haiku, and owner billing to the model', async () => {
+  it('sends the 2,000-token output cap, Haiku, and owner billing to the model', async () => {
     const { url, body, headers } = await runAssistant('ok')
     expect(url).toContain('/api/proxy/anthropic/v1/messages')
     expect(body.model).toBe('claude-haiku-5-5')
     expect(body.max_tokens).toBe(ASSISTANT_MAX_OUTPUT_TOKENS)
-    expect(ASSISTANT_MAX_OUTPUT_TOKENS).toBe(1500)
+    expect(ASSISTANT_MAX_OUTPUT_TOKENS).toBe(2000)
     // The proxy bills the X-Auth-Token subject: the owner's JWT, not the caller's.
     expect(headers.get('x-auth-token')).toBe('owner-jwt')
   })
