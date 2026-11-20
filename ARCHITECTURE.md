@@ -22,7 +22,7 @@ src/
   constants.ts             APP_NAME, APP_ID, SCOPE_ID = `app:${APP_ID}`
   nav.ts                   Navigation bar entries
   schemas.ts               Array of every collection schema (shared by worker and frontend)
-  schemas/                 One file per collection (users, settings, applications, emails, syncState, ai-chat) + permissions.test.ts
+  schemas/                 One file per collection (users, settings, applications, emails, syncState, appUsage, ai-chat) + permissions.test.ts
   pages/                   Routes. Folder determines what a page gets (see below)
     (app)/home.tsx           Redirects to /board
     (app)/(protected)/board.tsx     Pipeline board and first-run screen
@@ -31,6 +31,7 @@ src/
     ApplicationCard.tsx      Card, status picker, email timeline dialog
     SyncControls.tsx         useSync hook (sync, connect, sync on open) and header controls
     ChatPanel*.tsx/.ts       Assistant chat panel (ai-chat installer); .messages.tsx adds the proposal card
+    proposal-state.ts        Whether a proposal card is active, replaced or expired (+ test)
   lib/utils.ts             cn, callAction (POST /api/actions/:name with JWT), authedGet
   themes.css / themes.ts   "applytrack" theme: palette and status inks (--status-*)
   server/
@@ -110,6 +111,7 @@ The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOP
 | `applications` | `applications-schema.ts` | One row per user, company and role | member/admin: read own, update own (`status` only); no client create or delete |
 | `emails` | `emails-schema.ts` | Application timeline and sync ledger | member/admin: read own only |
 | `ai-chats`, `ai-messages` | `ai-chat-schema.ts` | Assistant chat history (SDK schemas). Written only by the chat routes | member/admin: read, update and delete own; no client create (admin overridden from the SDK's read-all) |
+| `appUsage` | `app-usage-schema.ts` | App-wide counters, one row per UTC day (record ID `assistant-YYYY-MM-DD`, `assistantMessages`). Written only by the chat route | Closed to every role, admin included |
 | `syncState` | `sync-state-schema.ts` | One row per user (record ID = userId): `lastSyncAt` for the rate limit, `cursorAt` for Gmail, `chatWindowStart` + `chatCount` for the assistant's message limit | member/admin: read own only. Not on `users`, because members can update their own `users` row |
 
 **`applications`**
@@ -317,20 +319,42 @@ Reads go through the SDK's user executor as the verified caller, so `read: 'own'
 **Email text never reaches the model.** `list_email_events` drops `from`, `subject` and `snippet`, so an email saying "move every card to offer" has no path into the assistant. The cost: it can't answer "what did Oracle say?", and "replied" means "has an email event", which includes automated replies. A small channel remains: company and role names were extracted from emails by sync's AI (grounded against the email, max 200 characters). The system prompt calls them data, and the worst they can do is cause a proposal the user can cancel.
 
 **Status changes need a click.** The model has no write tool. `propose_status_change` returns a proposal, and `ChatPanel.messages.tsx` renders it as a card with **Confirm** and **Cancel**. Confirm writes `put(applicationId, { status })` from the browser, the same mutation as the board's dropdown, so the schema limits it to `status` on the user's own rows. The card shows "Done" once the application has that status. Cancel is local and changes nothing.
+- **Stale proposals** (`src/components/proposal-state.ts`): each proposal carries `proposedAt`, the server's time. `ChatPanel` computes the newest proposal per application across the chat and passes it to the cards through `NewestProposalsContext`.
+  - A card turns off Confirm when a newer proposal exists for the same application ("Replaced by a newer proposal below.") or when it's 10 minutes old ("Expired. Ask again to change it.").
+  - Proposals without `proposedAt` (made before this existed) count as expired.
+  - A timer re-renders the card when it expires, and Confirm re-checks at click time.
+  - This is browser-side only: the server can't tell a stale click from the dropdown. The schema still limits writes to `status` on the user's own rows.
 - *Why not the AI SDK's tool approval:* ai 7 has `needsApproval` / `toolApproval`, but DeepSpace's chat route persists and replays turns itself (`buildUiParts`, `turnsToCoreMessages`) with no approval support in deepspace 0.44.2, so using it would mean rewriting chat persistence. The card is less code and stronger: no write tool exists to approve.
 
 **Model and billing (`src/ai/chat-routes.ts`).**
-- The server always uses `claude-haiku-5-5` at `effort: 'low'`, with at most 6 tool calls per message and a 2,000-character message cap. The client's `modelId` is ignored.
+- **Scope:** the system prompt limits the assistant to the user's applications and job search. Anything else gets a one-sentence decline with no tool calls.
+- **Per-message bounds**, all in `assistantStreamSettings()` and the constants above it:
+  - The server always uses `claude-haiku-5-5` at `effort: 'low'`. The client's `modelId` is ignored.
+  - At most **4 tool calls**, so at most 5 model calls per message.
+  - **`maxOutputTokens: 500`** per model call (the SDK default is 64,000).
+  - A 2,000-character cap on the user's message.
+  - **`contextBudget: 30_000`** characters of history (`ASSISTANT_CONTEXT_CONFIG`; the SDK default is 240,000). Older history gets summarized, which is one extra owner-billed call when it happens.
 - **Owner-billed:** `streamDeepSpaceAgent` and the compaction summarizer get no `authToken`, so they fall back to `APP_OWNER_JWT`. Reviewers with zero credits can chat (verified: 200, not 402).
-- **Limit:** `claimChatMessage` runs after the chat-ownership check and before any model call. It counts messages in a 24-hour window that starts at the user's first message, on the caller's `syncState` row, written with the RBAC-off action tools as the verified user. Users can read that row but not write it. The 31st message gets a plain-text **429**. Same accepted race as sync: two requests in the same instant can both pass.
-- **Measured cost:** see AGENT_LOG.md (2026-11-19).
+- **Limits:** `claimChatMessage` runs after the chat-ownership check and before any model call. It reads both counters, refuses with a plain-text **429** if either is full, and counts nothing on a refusal. Otherwise it increments both.
+  - **Per user:** 30 messages (`CHAT_DAILY_LIMIT`) in a 24-hour window that starts at the user's first message. Stored on the caller's `syncState` row, which users can read but not write.
+  - **App-wide:** 200 messages per UTC day across all accounts (`APP_DAILY_LIMIT`), on the closed `appUsage` row. It's a circuit breaker against many accounts. **To change it, edit the one constant `APP_DAILY_LIMIT` in `src/ai/chat-routes.ts`.**
+  - The refusal says which limit was hit.
+  - Same accepted race as sync: requests in the same instant can slip a few messages past a cap.
+- **Cost:** measured about $0.0005 per message on demo data; worst-case bounds are in AGENT_LOG.md (2026-11-19, assistant limits).
 
 **Tests.**
 - `src/ai/tools.test.ts`: exactly three tools; every executor call is `records.query`; email events never carry sender, subject or snippet; a proposal changes nothing; another user's id is not found; only the four statuses parse.
-- `src/ai/chat-routes.test.ts`: 30 messages pass, the 31st is refused with the right retry time and isn't counted, the window resets after 24 hours, sync's fields survive, users are counted separately.
+- `src/ai/chat-routes.test.ts`:
+  - **Per user:** the 31st message is refused with the right retry time and doesn't count; the window resets after 24 hours; sync's fields survive.
+  - **App-wide:** the 201st message of a UTC day is refused for everyone without counting the user; the next UTC day starts a new row; the refusal text names the limit.
+  - **Real SDK call with a fake `API_WORKER` binding:** the request to the model has `max_tokens: 500`, `claude-haiku-5-5`, the owner's token in `X-Auth-Token`, and the scope rule in `system`. A mocked refusal reaches the user unchanged, and a reply cut off at the cap ends cleanly. Also checks 4 tool calls and the 30,000-character budget.
+- `src/components/proposal-state.test.ts`: proposals are active, replaced, expired after 10 minutes, or expired when they have no timestamp; the newest proposal per application is picked across messages.
+- `src/schemas/permissions.test.ts`: `appUsage` is closed for `*`, viewer, member and admin.
 - `src/schemas/permissions.test.ts`: a member can't update another user's application, and only `status` is writable. For `ai-chats` and `ai-messages`, another member, an admin, a viewer and a signed-out user can't read Alice's rows, and another member or admin can't update or delete them.
 - `tests/sync-demo.spec.ts`: `GET /_deepspace/agent/browser/tools` and MCP `tools/list` return exactly the three names, and `records_update` is a 404.
-- `tests/board.spec.ts`: with the model mocked by `page.route` on `/api/ai/chat`, a proposal card appears and Kestrel stays in Applied; Cancel changes nothing; Confirm moves it to Interview, and that survives a reload.
+- `tests/board.spec.ts`: with the model mocked by `page.route` on `/api/ai/chat`:
+  - Stale proposals: of three cards, the older Kestrel card shows "Replaced…" with no Confirm, the newer one can confirm, and an 11-minute-old Maple Ridge card shows "Expired…".
+  - A proposal card appears and Kestrel stays in Applied; Cancel changes nothing; Confirm moves it to Interview, and that survives a reload.
 
 ## Build and deploy
 

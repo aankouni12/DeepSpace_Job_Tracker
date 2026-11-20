@@ -90,7 +90,14 @@ describe('propose_status_change', () => {
   it("returns a proposal for the user's own application and changes nothing", async () => {
     const out = await run(buildTools(aliceRoom()), 'propose_status_change', { applicationId: 'app-1', status: 'interview' })
     expect(out).toEqual({
-      proposal: { applicationId: 'app-1', company: 'Kestrel', role: 'Backend', from: 'applied', to: 'interview' },
+      proposal: {
+        applicationId: 'app-1',
+        company: 'Kestrel',
+        role: 'Backend',
+        from: 'applied',
+        to: 'interview',
+        proposedAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+      },
     })
     expect(aliceApps[0].data.status).toBe('applied')
   })

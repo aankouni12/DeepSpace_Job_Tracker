@@ -52,9 +52,28 @@ function recordRoomStub(env: Env): DurableObjectStub {
 }
 
 // The assistant is owner-billed, so the server picks the model (the client's
-// modelId is ignored) and bounds each message's size and tool calls.
+// modelId is ignored) and bounds every cost driver of a message.
 const ASSISTANT_MODEL = 'claude-haiku-5-5'
 const MAX_USER_CONTENT_LENGTH = 2_000
+/** Per model call (the SDK default is 64,000). A message makes at most MAX_TOOL_CALLS + 1 calls. */
+export const ASSISTANT_MAX_OUTPUT_TOKENS = 500
+export const ASSISTANT_MAX_TOOL_CALLS = 4
+/** History over 30,000 characters is summarized (SDK default 240,000). */
+export const ASSISTANT_CONTEXT_CONFIG = { ...DEFAULT_CONTEXT_CONFIG, contextBudget: 30_000 }
+
+/** The model settings every assistant turn uses (exported so tests check the real wiring). */
+export function assistantStreamSettings(now: Date) {
+  return {
+    profile: 'application' as const,
+    modelId: ASSISTANT_MODEL,
+    // No authToken: bills the app owner (APP_OWNER_JWT), so reviewers with
+    // zero credits can chat. Bounded by the limits below.
+    effort: 'low' as const,
+    maxToolCalls: ASSISTANT_MAX_TOOL_CALLS,
+    maxOutputTokens: ASSISTANT_MAX_OUTPUT_TOKENS,
+    instructions: buildSystemPrompt(now),
+  }
+}
 
 // Per-user message limit: a fixed 24-hour window that starts at the first
 // message. Stored on the caller's syncState row, which users can read but not
@@ -62,34 +81,67 @@ const MAX_USER_CONTENT_LENGTH = 2_000
 export const CHAT_DAILY_LIMIT = 30
 const CHAT_WINDOW_MS = 24 * 60 * 60 * 1000
 
+// App-wide circuit breaker: messages per UTC day across all accounts, on an
+// appUsage row no role can read or write (src/schemas/app-usage-schema.ts).
+// Change this one number to raise or lower it.
+export const APP_DAILY_LIMIT = 200
+
 type ChatQuotaRow = { chatWindowStart?: string; chatCount?: number }
+type AppUsageRow = { day: string; assistantMessages?: number }
+
+export type ChatClaim =
+  | { ok: true }
+  | { ok: false; scope: 'user' | 'app'; retryAfterSeconds: number }
 
 /**
- * Count one message against the caller's limit, or refuse it. `tools` must be
- * the server's RBAC-off action tools; `userId` is the verified caller only.
- * Two requests in the same instant can both pass (same accepted race as sync).
+ * Count one message against the caller's limit and the app-wide limit, or
+ * refuse it without counting anything. `tools` must be the server's RBAC-off
+ * action tools; `userId` is the verified caller only. Two requests in the
+ * same instant can both pass (same accepted race as sync).
  */
-export async function claimChatMessage(
-  tools: ActionTools,
-  userId: string,
-  now: number,
-): Promise<{ ok: true } | { ok: false; retryAfterSeconds: number }> {
-  const existing = await tools.get<ChatQuotaRow>('syncState', userId)
-  const row = existing.success ? existing.data.record.data : undefined
+export async function claimChatMessage(tools: ActionTools, userId: string, now: number): Promise<ChatClaim> {
+  const day = new Date(now).toISOString().slice(0, 10)
+  const appId = `assistant-${day}`
+  const [userRes, appRes] = await Promise.all([
+    tools.get<ChatQuotaRow>('syncState', userId),
+    tools.get<AppUsageRow>('appUsage', appId),
+  ])
+
+  const appCount = appRes.success ? (appRes.data.record.data.assistantMessages ?? 0) : 0
+  if (appCount >= APP_DAILY_LIMIT) {
+    const nextDay = Date.parse(`${day}T00:00:00.000Z`) + CHAT_WINDOW_MS
+    return { ok: false, scope: 'app', retryAfterSeconds: Math.ceil((nextDay - now) / 1000) }
+  }
+
+  const row = userRes.success ? userRes.data.record.data : undefined
   const start = Date.parse(row?.chatWindowStart ?? '')
   const inWindow = Number.isFinite(start) && now - start < CHAT_WINDOW_MS
   const count = inWindow ? (row?.chatCount ?? 0) : 0
   if (count >= CHAT_DAILY_LIMIT) {
-    return { ok: false, retryAfterSeconds: Math.ceil((start + CHAT_WINDOW_MS - now) / 1000) }
+    return { ok: false, scope: 'user', retryAfterSeconds: Math.ceil((start + CHAT_WINDOW_MS - now) / 1000) }
   }
-  const data: ChatQuotaRow = inWindow
+
+  const userData: ChatQuotaRow = inWindow
     ? { chatCount: count + 1 }
     : { chatWindowStart: new Date(now).toISOString(), chatCount: 1 }
-  const res = existing.success
-    ? await tools.update('syncState', userId, data)
-    : await tools.create('syncState', { userId, ...data }, userId)
-  if (!res.success) throw new Error(`chat limit write failed: ${res.error}`)
+  const userWrite = userRes.success
+    ? await tools.update('syncState', userId, userData)
+    : await tools.create('syncState', { userId, ...userData }, userId)
+  if (!userWrite.success) throw new Error(`chat limit write failed: ${userWrite.error}`)
+
+  const appWrite = appRes.success
+    ? await tools.update('appUsage', appId, { assistantMessages: appCount + 1 })
+    : await tools.create('appUsage', { day, assistantMessages: 1 }, appId)
+  if (!appWrite.success) throw new Error(`app limit write failed: ${appWrite.error}`)
   return { ok: true }
+}
+
+export function limitMessage(claim: Extract<ChatClaim, { ok: false }>): string {
+  const hours = Math.max(1, Math.ceil(claim.retryAfterSeconds / 3600))
+  const when = `Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`
+  return claim.scope === 'app'
+    ? `The assistant has reached today's limit for everyone. ${when}`
+    : `You've used all ${CHAT_DAILY_LIMIT} assistant messages for today. ${when}`
 }
 
 // Derive a chat title from the first user message — first non-empty line,
@@ -213,13 +265,7 @@ export function registerAiChatRoutes(
     // Before any model call (compaction included). Plain text: the panel
     // shows the response body as the error message.
     const quota = await claimChatMessage(createActionTools(c.env, auth.userId, jwt), auth.userId, Date.now())
-    if (!quota.ok) {
-      const hours = Math.ceil(quota.retryAfterSeconds / 3600)
-      return c.text(
-        `You've used all ${CHAT_DAILY_LIMIT} assistant messages for today. Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`,
-        429,
-      )
-    }
+    if (!quota.ok) return c.text(limitMessage(quota), 429)
 
     // Load history before writing this turn. `persistTurn` later writes user then
     // assistant as separate DO operations; the ordering is intentional, but
@@ -259,7 +305,7 @@ export function registerAiChatRoutes(
     const summarizer = makeDefaultSummarizer(c.env)
     const { messages: prepared, newSummary } = await prepareMessagesWithCompaction(
       turns,
-      DEFAULT_CONTEXT_CONFIG,
+      ASSISTANT_CONTEXT_CONFIG,
       { summarizer, cachedSummary },
     )
     if (newSummary) {
@@ -275,7 +321,8 @@ export function registerAiChatRoutes(
       provider: selectedModel.provider,
       modelId: usedModelId,
     }
-    const baseSystem = buildSystemPrompt(new Date())
+    const settings = assistantStreamSettings(new Date())
+    const baseSystem = settings.instructions
 
     // Compaction inserts at most one summary system message at index 0; fold
     // it into the top-level `system` so we don't pass two system roles. Then
@@ -384,12 +431,7 @@ export function registerAiChatRoutes(
     }
 
     const { result } = streamDeepSpaceAgent(c.env, {
-      profile: 'application',
-      modelId: usedModelId,
-      // No authToken: bills the app owner (APP_OWNER_JWT), so reviewers with
-      // zero credits can chat. Bounded by CHAT_DAILY_LIMIT per user.
-      effort: 'low',
-      maxToolCalls: 6,
+      ...settings,
       instructions: systemText,
       messages,
       tools,

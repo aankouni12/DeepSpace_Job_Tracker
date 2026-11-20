@@ -1,5 +1,8 @@
 import {
+  createContext,
   memo,
+  useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -13,6 +16,10 @@ import { Check, Copy } from 'lucide-react'
 import 'highlight.js/styles/atom-one-dark.css'
 import { useMutations, useQuery } from 'deepspace'
 import type { Application, Status } from './ApplicationCard'
+import { PROPOSAL_TTL_MS, proposalState } from './proposal-state'
+
+/** Newest proposedAt per applicationId in the open chat (provided by ChatPanel). */
+export const NewestProposalsContext = createContext<Map<string, string>>(new Map())
 import type {
   MessagePart,
   ToolInvocation,
@@ -258,7 +265,7 @@ function describeTool(
   }
 }
 
-type Proposal = { applicationId: string; company: string; role: string; from: string; to: Status }
+type Proposal = { applicationId: string; company: string; role: string; from: string; to: Status; proposedAt?: string }
 
 function proposalOf(invocation: ToolInvocation): Proposal | null {
   if (invocation.toolName !== 'propose_status_change' || invocation.state !== 'result') return null
@@ -277,8 +284,24 @@ function ProposalCard({ proposal }: { proposal: Proposal }) {
   const [state, setState] = useState<'idle' | 'saving' | 'cancelled' | 'failed'>('idle')
   const current = apps.records.find((r) => r.recordId === proposal.applicationId)?.data.status
   const done = current === proposal.to
+  const newest = useContext(NewestProposalsContext).get(proposal.applicationId)
+  const [now, setNow] = useState(() => Date.now())
+  const freshness = proposalState(proposal.proposedAt, newest, now)
+
+  // Re-render when this proposal expires, so Confirm turns off without a click.
+  useEffect(() => {
+    if (freshness !== 'active') return
+    const left = Date.parse(proposal.proposedAt!) + PROPOSAL_TTL_MS - Date.now()
+    const timer = setTimeout(() => setNow(Date.now()), Math.max(0, left) + 50)
+    return () => clearTimeout(timer)
+  }, [freshness, proposal.proposedAt])
 
   const confirm = () => {
+    // Re-check at click time (the tab may have slept past the timer).
+    if (proposalState(proposal.proposedAt, newest, Date.now()) !== 'active') {
+      setNow(Date.now())
+      return
+    }
     setState('saving')
     put(proposal.applicationId, { status: proposal.to }).then(
       () => setState('idle'),
@@ -297,6 +320,10 @@ function ProposalCard({ proposal }: { proposal: Proposal }) {
           <span className="text-muted-foreground" role="status">Done. It&apos;s in {proposal.to}.</span>
         ) : state === 'cancelled' ? (
           <span className="text-muted-foreground" role="status">Cancelled. Nothing changed.</span>
+        ) : freshness === 'superseded' ? (
+          <span className="text-muted-foreground" role="status">Replaced by a newer proposal below.</span>
+        ) : freshness === 'expired' ? (
+          <span className="text-muted-foreground" role="status">Expired. Ask again to change it.</span>
         ) : (
           <>
             <button

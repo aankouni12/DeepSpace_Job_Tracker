@@ -65,7 +65,7 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
   // Assistant: a status change happens only on Confirm. The model is mocked
   // (page.route on /api/ai/chat) with a reply that calls propose_status_change
   // for Kestrel; the real tool and real write path are used for everything else.
-  const kestrelId = await page.evaluate(async () => {
+  const ids = await page.evaluate(async () => {
     const { token } = await (await fetch('/api/auth/token', { method: 'POST', credentials: 'include' })).json()
     const r = await fetch('/_deepspace/agent/browser/tools/list_applications', {
       method: 'POST',
@@ -73,22 +73,38 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
       body: JSON.stringify({ input: {} }),
     })
     const { result } = await r.json()
-    return (result.applications as { id: string; company: string }[]).find((a) => a.company === 'Kestrel Systems')!.id
+    return Object.fromEntries((result.applications as { id: string; company: string }[]).map((a) => [a.company, a.id]))
   })
+  const kestrelId = ids['Kestrel Systems']
+  const mapleId = ids['Maple Ridge Software']
   const sse = (chunks: object[]) => chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n'
+  const proposalChunks = (toolCallId: string, proposal: Record<string, unknown>) => [
+    { type: 'tool-input-available', toolCallId, toolName: 'propose_status_change', input: { applicationId: proposal.applicationId, status: proposal.to } },
+    { type: 'tool-output-available', toolCallId, output: { proposal } },
+  ]
+  const kestrelTo = (to: string, proposedAt: string) =>
+    ({ applicationId: kestrelId, company: 'Kestrel Systems', role: 'Backend Developer', from: 'applied', to, proposedAt })
   let call = 0
   await page.route('**/api/ai/chat', (route) => {
-    const toolCallId = `t${++call}`
+    const n = ++call
+    const now = Date.now()
+    const chunks =
+      n === 1
+        ? // Stale proposals: an older and a newer one for Kestrel, and one for Maple Ridge from 11 minutes ago.
+          [
+            ...proposalChunks('s1', kestrelTo('interview', new Date(now - 2000).toISOString())),
+            ...proposalChunks('s2', kestrelTo('offer', new Date(now).toISOString())),
+            ...proposalChunks('s3', {
+              applicationId: mapleId, company: 'Maple Ridge Software', role: 'QA Engineer', from: 'rejected', to: 'applied',
+              proposedAt: new Date(now - 11 * 60 * 1000).toISOString(),
+            }),
+          ]
+        : proposalChunks(`t${n}`, kestrelTo('interview', new Date(now).toISOString()))
     return route.fulfill({
       contentType: 'text/event-stream',
       body: sse([
         { type: 'start' },
-        { type: 'tool-input-available', toolCallId, toolName: 'propose_status_change', input: { applicationId: kestrelId, status: 'interview' } },
-        {
-          type: 'tool-output-available',
-          toolCallId,
-          output: { proposal: { applicationId: kestrelId, company: 'Kestrel Systems', role: 'Backend Developer', from: 'applied', to: 'interview' } },
-        },
+        ...chunks,
         { type: 'text-delta', id: 'x', delta: 'I proposed moving Kestrel Systems to Interview. Confirm below.' },
         { type: 'finish' },
       ]),
@@ -105,6 +121,18 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
     await panel.getByRole('button', { name: 'Send message' }).click()
   }
   const kestrel = (lane: string) => page.getByTestId(`lane-${lane}`).getByText('Kestrel Systems', { exact: true })
+
+  // Stale proposals: the older Kestrel card is replaced by the newer one, and
+  // an 11-minute-old proposal is expired. Only the newest, fresh card can confirm.
+  await ask()
+  const cards = panel.getByTestId('status-proposal')
+  await expect(cards).toHaveCount(3)
+  await expect(cards.nth(0)).toContainText('Replaced by a newer proposal below.')
+  await expect(cards.nth(0).getByRole('button', { name: 'Confirm' })).toHaveCount(0)
+  await expect(cards.nth(1).getByRole('button', { name: 'Confirm' })).toBeEnabled()
+  await expect(cards.nth(2)).toContainText('Expired. Ask again to change it.')
+  await expect(cards.nth(2).getByRole('button', { name: 'Confirm' })).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('assistant-stale.png') })
 
   await ask()
   const proposal = panel.getByTestId('status-proposal').last()

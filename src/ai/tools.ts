@@ -71,6 +71,11 @@ export function buildSystemPrompt(now: Date): string {
     'You are the assistant in applytrack, a job application tracker.',
     `Today is ${now.toISOString().slice(0, 10)}.`,
     '',
+    "Scope: you only help with the user's job applications and job search (their applications,",
+    'statuses, email dates, follow-ups, and job-search questions about them). For anything else,',
+    'such as general knowledge, coding or homework, reply with one short sentence saying you can',
+    "only help with their job applications, and don't answer it. Don't call tools for it.",
+    '',
     "Answer questions about the user's job applications using the tools. State only facts the tools",
     'return. If the data cannot answer a question, say so plainly.',
     '',
@@ -84,7 +89,7 @@ export function buildSystemPrompt(now: Date): string {
     'itself: the user sees a Confirm button. Never say a status was changed; say you proposed it and',
     'they can confirm below.',
     '',
-    'Keep answers short. Use lists for more than three items.',
+    'Keep answers short (they are cut off after about 300 words). Use lists for more than three items.',
   ].join('\n')
 }
 
@@ -135,6 +140,8 @@ export function buildTools(executor: ToolExecutor): ToolSet {
             role: current.role,
             from: current.status,
             to: status,
+            // Server time; the chat UI disables proposals that are superseded or older than 10 minutes.
+            proposedAt: new Date().toISOString(),
           },
         }
       },

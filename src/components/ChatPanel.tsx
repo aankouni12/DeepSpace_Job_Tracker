@@ -23,7 +23,8 @@ import {
   Square,
 } from 'lucide-react'
 import { listDeepSpaceAgentModels, useQuery } from 'deepspace'
-import { EmptyState, MessageTurn, ThinkingIndicator } from './ChatPanel.messages'
+import { EmptyState, MessageTurn, NewestProposalsContext, ThinkingIndicator } from './ChatPanel.messages'
+import { newestProposals } from './proposal-state'
 import { useStreamingChat } from './ChatPanel.stream'
 
 export type ModelOption = {
@@ -167,6 +168,8 @@ export function ChatPanel({
     })
     return [...persisted, ...overlay]
   }, [activeChatId, inFlight, persisted, persistedIds])
+  // Lets an older proposal card see that a newer one exists for the same application.
+  const newestByApp = useMemo(() => newestProposals(messages), [messages])
 
   useEffect(() => {
     const element = scrollRef.current
@@ -259,18 +262,20 @@ export function ChatPanel({
         {messages.length === 0 ? (
           <EmptyState prompts={emptyStatePrompts} onPick={selectPrompt} />
         ) : (
-          <div className={`mx-auto flex max-w-[44rem] flex-col ${turnGap}`}>
-            {messages.map((message) => (
-              <MessageTurn
-                key={message.id}
-                role={message.role}
-                content={message.content}
-                parts={message.parts}
-                isStreaming={message.id === streamingAssistantId}
-              />
-            ))}
-            {waitingForAssistant && <ThinkingIndicator />}
-          </div>
+          <NewestProposalsContext.Provider value={newestByApp}>
+            <div className={`mx-auto flex max-w-[44rem] flex-col ${turnGap}`}>
+              {messages.map((message) => (
+                <MessageTurn
+                  key={message.id}
+                  role={message.role}
+                  content={message.content}
+                  parts={message.parts}
+                  isStreaming={message.id === streamingAssistantId}
+                />
+              ))}
+              {waitingForAssistant && <ThinkingIndicator />}
+            </div>
+          </NewestProposalsContext.Provider>
         )}
       </div>
 

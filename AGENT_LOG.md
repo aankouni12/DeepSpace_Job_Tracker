@@ -587,3 +587,70 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 **Correction:** CLAUDE.md → Security now says: "Never deploy unless main is pushed and matches origin/main. If a push fails, stop and ask."
 
 **State after the user's push:** `main` and `origin/main` are both at `6ca59b0`, which matches the live app.
+
+---
+
+## 2026-11-19: Assistant cost limits and stale proposals (branch `feature/assistant-limits`)
+
+**The user's live test of the assistant:** questions answered; Cancel left the card unchanged; Confirm moved it.
+
+**Two problems found:**
+1. It answered "what is a linked list", so it's a general chatbot the owner pays for.
+2. An older proposal card still had an active Confirm after a newer proposal was made for the same application.
+
+**Asked:**
+- Restrict the assistant to job-search questions.
+- Cap output at about 500 tokens.
+- Context budget of about 30,000 characters.
+- An app-wide daily cap that users can't reset.
+- Disable stale proposals: replaced by a newer one, or older than about 10 minutes.
+- Tests for the scope refusal (mocked), the output cap and stale proposals.
+- The measured cost per message, and the worst case per user per day.
+
+**Plan approved, with two changes from the user:**
+- `maxToolCalls` 4 (the agent's option).
+- An app-wide cap of **200** messages a day instead of 500, noted as a one-line change.
+
+**Built** (details in ARCHITECTURE.md → AI assistant):
+- **Scope** rule in the system prompt.
+- **Caps:** `maxOutputTokens: 500`, `maxToolCalls: 4`, and `contextBudget: 30_000`. They live in `assistantStreamSettings()`, which both the route and the tests use.
+- **App-wide limit:** a new closed collection `appUsage`, one row per UTC day. `claimChatMessage` now checks both limits, counts nothing on a refusal, and returns `scope: 'user' | 'app'` so the 429 says which limit was hit.
+- **Stale proposals:** `proposedAt` on each proposal, `proposal-state.ts`, and `NewestProposalsContext` from `ChatPanel` to the cards.
+- **Caught and reverted by the agent:** it had also added "name applications by company, never by id" to the prompt, which the user hadn't approved. The line was taken out before committing; that fix is still open.
+
+**Failures and fixes along the way:**
+1. **`tools.test`** expected the old proposal shape. Updated for `proposedAt`.
+2. **Billing assertion:** the test looked for `authorization`, but the proxy sends the token as `X-Auth-Token` (`setProxyHeaders`, deepspace `dist/worker.js` 8224). The test now checks that header for the owner's JWT.
+
+**Verified by the agent:**
+- `tsc` and eslint are clean.
+- vitest **94/94**. Playwright **14/14** on fresh local data, including the stale-proposal cards.
+- **The output-cap test goes through the real `streamDeepSpaceAgent` call** with a fake `API_WORKER` binding. Without the setting, the captured request would carry the SDK's 64,000.
+- **Real model, local, zero-credit Reviewer Two, demo data** (throwaway spec, deleted afterwards):
+
+| Message | Calls | Cost | Result |
+|---|---|---|---|
+| "What is a linked list?" | 1 | $0.00017 | Declined in one sentence, no tools |
+| "Which companies haven't replied in 2 weeks?" | 2 | $0.00066 | Answered by company and role (73 words) |
+| "Move Kestrel Systems to Interview" | 2 | $0.00059 | Proposal with `proposedAt` |
+
+- **Total:** 5 calls, $0.00142558 (owner `app usage`: 99 → 104 calls). **About $0.0005 per message.**
+- The platform's hold before each call fell from about $0.042 to about $0.0005–0.0007, consistent with `max_tokens` dropping from 64,000 to 500.
+
+**Worst case (an estimate, not measured).**
+
+*Prices:* Anthropic's published Claude Haiku 5.5 price, $0.10 per million input tokens and $0.50 per million output, from the claude-api skill's model table (cached 2026-11-03). That table also lists $0.50 / $2.50 beyond 100,000 input tokens, which the bound below never reaches. The proxy's measured cost per call matches that price closely.
+
+*Inputs, about 4 characters per token:*
+- About 2,500 tokens of system prompt and tool definitions.
+- Up to about 8,000 tokens of history (30,000 characters).
+- This turn's tool results.
+
+| | Per model call | Per message (5 calls) | Per user per day (30) | App-wide per day (200) |
+|---|---|---|---|---|
+| With this app's real tool sizes (100 email events ≈ 13,000 characters, about 37 applications ≈ 6,000) | ≈ $0.0023 | ≈ $0.012 | ≈ $0.35 | ≈ **$2.30** |
+| SDK ceiling (every tool result at the 30,000-character cap) | ≈ $0.0043 | ≈ $0.021 | ≈ $0.64 | ≈ **$4.30** |
+
+Plus at most one summarizer call per message once history passes 30,000 characters.
+
+**Typical:** at the measured $0.0005 per message, 200 messages a day is about $0.10.

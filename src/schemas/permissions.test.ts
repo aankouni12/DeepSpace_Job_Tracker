@@ -117,6 +117,23 @@ describe('assistant chats and messages', () => {
   }
 })
 
+describe('appUsage (app-wide assistant counter)', () => {
+  const row = { createdBy: JOB, data: { day: '2026-11-19', assistantMessages: 5 } }
+  const appUsage = schemas.find((s) => s.name === 'appUsage')!
+
+  it('is closed to every role, admin included: no read, create, update or delete', () => {
+    expect(appUsage).toBeDefined()
+    for (const role of ['*', 'viewer', 'member', 'admin']) {
+      for (const user of [ALICE, JOB]) {
+        expect(canRead(appUsage, role, row, user)).toBe(false)
+        expect(canUpdate(appUsage, role, row, user)).toBe(false)
+        expect(canDelete(appUsage, role, row, user)).toBe(false)
+      }
+      expect(canCreate(appUsage, role)).toBe(false)
+    }
+  })
+})
+
 describe('syncState updates', () => {
   it('owner cannot reset their own rate limit', () => {
     for (const role of ['member', 'admin']) {

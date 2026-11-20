@@ -13,6 +13,7 @@ import { settingsSchema } from './schemas/admin-schema'
 import { applicationsSchema } from './schemas/applications-schema'
 import { emailsSchema } from './schemas/emails-schema'
 import { syncStateSchema } from './schemas/sync-state-schema'
+import { appUsageSchema } from './schemas/app-usage-schema'
 
 import { aiChatSchemas } from './schemas/ai-chat-schema'
 
@@ -23,4 +24,5 @@ export const schemas: CollectionSchema[] = [
   applicationsSchema,
   emailsSchema,
   syncStateSchema,
+  appUsageSchema,
 ]
