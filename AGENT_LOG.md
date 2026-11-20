@@ -4,21 +4,39 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 ---
 
-## Next session (updated 2026-11-19)
+## Next session (updated 2026-11-20)
 
-**Done (live at https://applytrack.app.space, release 6, `main` @ `fc77fac`):**
+**All features are done.** Live at https://applytrack.app.space, deployed from `main` @ `6fa40c0` (= `origin/main`):
 - Platform sign-in; read-only Gmail connection (`gmailRead` only).
-- Data model with per-user permissions: `applications`, `emails`, `syncState`.
-- `sync` server action (Gmail and demo): user-tuned Gmail query, paging, cursor, up to 100 emails, one AI batch at a time, classification from the email body, company/role merging, status that only moves forward, 10-minute rate limit, owner-billed AI.
-- `deleteMyData` action, with a button in Settings.
-- Pipeline board: first-run screen, live lanes, status dropdown, email timeline, Sync / Connect / Load demo, sync on open after 24 hours.
-- Tests: 64 unit, 13 Playwright.
+- **Data model** with per-user permissions: `applications`, `emails`, `syncState`, plus `appUsage`, which is closed to every role. The `ai-chats` and `ai-messages` collections are own-rows-only, admin included.
+- **`sync` server action** (Gmail and demo):
+  - user-tuned Gmail query, paging and cursor, up to 100 emails;
+  - classification from the email body, company/role merging, and status that only moves forward;
+  - 10-minute rate limit; owner-billed AI.
+- **`deleteMyData`**, with a button in Settings.
+- **Pipeline board:** first-run screen, live lanes, status dropdown, email timeline, Sync / Connect / Load demo, and sync on open after 24 hours.
+- **AI assistant** (board panel):
+  - three read-only tools that see email metadata only; status changes need a Confirm click;
+  - stale proposals are disabled;
+  - scope limited to the job search;
+  - owner-billed Haiku 5.5 with 2,000 output tokens, 4 tool calls and 30,000 characters of history;
+  - 30 messages per user per day and 200 per day app-wide;
+  - "(reply shortened)" when a reply still hits the cap.
+- **Tests:** 97 unit, plus 2 real-model tests (`RUN_MODEL_TESTS=1`); 14 Playwright; 1 post-deploy live check (`tests/assistant.live.ts`).
+- **Workflow:** the agent commits and merges locally, and the user pushes. Deploy only when `main` = `origin/main`, from PowerShell at `C:\`, then run the live check.
 
-**Left before Saturday 2026-11-21, 11:59 PM ET:**
-1. **AI assistant:** shipped 2026-11-19, with the panel crash fixed in the redeploy (entries below). Left: the user's live retest, and cost per message on a real-Gmail account.
-2. **Self-host IBM Plex Sans** (drop the Google Fonts link).
-3. **Final tests:** full suite on fresh data, plus a manual real-Gmail pass on the live app.
-4. **Writeup:** include the privacy tradeoff (bodies go to the AI provider, capped, not stored) and the limitations below.
+**Friday 2026-11-20 (polish, test, write):**
+1. **Polish:**
+   - Self-host IBM Plex Sans (drop the Google Fonts link).
+   - Check the signed-out landing page.
+   - If time allows, a sync progress message.
+2. **A full reviewer test on a brand-new account:** sign-in, demo data, board, the assistant (questions, decline, propose/Confirm/Cancel, stale cards), and delete.
+3. **Draft the writeup:**
+   - the privacy tradeoff: email bodies go to the AI provider, capped at 1,500 characters, never stored;
+   - assistant cost controls and worst-case cost;
+   - the limitations below.
+
+**Saturday 2026-11-21:** final checks, and **submit by early evening** (the hard deadline is 11:59 PM ET).
 
 **Open risks and known limitations:**
 - Outbound calls per request: a 100-email sync is about 175 calls and took about 76 s. Both work, but the platform limits aren't documented, so the cap stays at 100.
@@ -28,6 +46,12 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - Card count is 37 against the user's expected 29–35; there may still be some role splits (not checked by name).
 - Interview definition: AI-agent screenings count as Applied (Stellantis). That's a one-line prompt change if the user wants otherwise.
 - Owner AI cost: about $0.0012 per demo sync, and an estimated $0.015–0.02 per 100-email Gmail sync. Limited by the rate limit only, not per account.
+- **Assistant cost:**
+  - Measured: about $0.0005–0.0012 per message.
+  - Worst case (an estimate): about $3.00 a day app-wide at this app's data sizes, about $5.00 at the theoretical ceiling, bounded by the 200-a-day cap.
+  - Haiku's hidden thinking counts against the 2,000-token cap and can't be turned off through the platform.
+- **Stale proposals and the Confirm write are enforced only in the browser.** The schema still limits writes to `status` on the user's own rows.
+- **The assistant sees company and role names,** which sync's AI extracted from emails. That leaves a small channel for prompt injection. The worst it can do is cause a proposal the user can cancel.
 
 ---
 
@@ -706,3 +730,13 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 **Why the agent's local measurements missed this:** the real-model checks on 2026-11-19 used demo data (5 applications) and short questions. Those answers were 19 to 73 words, small enough that thinking plus text fit under 500 tokens. The agent checked that answers arrived, but not their finish reason or output token count. And nothing tested a longer answer on inbox-sized data until the user hit it live. The new real-model test covers both.
 
 **Verified by the agent:** `tsc` and eslint are clean; vitest 97/97 (plus 2 real-model tests skipped by default, run and passing with `RUN_MODEL_TESTS=1`). Playwright 14/14 on fresh local data.
+
+**Shipped:**
+- `/security-review` found nothing.
+- The user pushed `main` @ `6fa40c0`. The agent confirmed `main` = `origin/main` and deployed from PowerShell at `C:\`.
+- Live: a single SDK bundle; `tests/assistant.live.ts` passed; signed out, the endpoints return 401.
+
+**Verified by the user on production (2026-11-20):**
+- The rejected list shows **all 12** with no truncation.
+- The **Stellantis** answer is complete.
+- **"What is a stack"** is still declined.
