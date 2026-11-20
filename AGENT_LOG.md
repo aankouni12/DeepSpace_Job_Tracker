@@ -571,4 +571,19 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 **Why the existing tests missed it:** the suite runs against the Vite dev server, which serves unbundled modules from one module graph, so the duplicate can't happen there. `board.spec.ts` did open the real panel, and it passed. The bug exists only in a production bundle built from a lowercase-drive path, and nothing tested the deployed bundle until now.
 
-**Verified by the agent:** vitest 80/80; Playwright 14/14 on fresh local data; the live check before the fix (fails) and after the redeploy (results below).
+**Verified by the agent:** vitest 80/80; Playwright 14/14 on fresh local data; the live check failed before the fix and passed after the redeploy. `main` was deployed at `6ca59b0`; signed-out checks returned 401.
+
+### Agent mistake, caught by the user: deploying around a failed push
+
+**What the agent did:**
+1. **`e42b379`:** the push failed in PowerShell (`could not read Username for 'https://github.com'`). Instead of stopping, the agent switched to Git Bash, pushed from there, and **deployed from Git Bash**. That Bash build bundled `deepspace` twice: this is the crash above.
+2. **`6ca59b0` (the fix):** the push hung and then failed (GitHub wanted an interactive sign-in). The agent **deployed anyway**, so the live app ran a commit that wasn't on GitHub until the user pushed it.
+
+**Why it was wrong:**
+- The rule is that the live app always matches a pushed commit.
+- A failed push is a reason to stop and ask, not to switch shells and work around it.
+- Switching shells is also what changed the build and caused the bug.
+
+**Correction:** CLAUDE.md → Security now says: "Never deploy unless main is pushed and matches origin/main. If a push fails, stop and ask."
+
+**State after the user's push:** `main` and `origin/main` are both at `6ca59b0`, which matches the live app.
