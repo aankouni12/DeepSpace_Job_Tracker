@@ -96,6 +96,10 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
   })
   await page.getByRole('button', { name: 'Ask the assistant' }).click()
   const panel = page.getByTestId('assistant-panel')
+  // The real panel renders (the mock above only answers sends). The dev server
+  // can't show bundling bugs; tests/assistant.live.ts checks the deployed bundle.
+  await expect(panel.getByText('How can I help?')).toBeVisible()
+  await expect(page.getByText('Something went wrong')).toHaveCount(0)
   const ask = async () => {
     await panel.getByRole('textbox').fill('Move Kestrel to Interview')
     await panel.getByRole('button', { name: 'Send message' }).click()

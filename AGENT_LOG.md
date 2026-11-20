@@ -15,7 +15,7 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - Tests: 64 unit, 13 Playwright.
 
 **Left before Saturday 2026-11-21, 11:59 PM ET:**
-1. **AI assistant:** built on `feature/assistant` (2026-11-19 entry below). Next: security review, merge, deploy, then measure cost per message on a real-Gmail account.
+1. **AI assistant:** shipped 2026-11-19, with the panel crash fixed in the redeploy (entries below). Left: the user's live retest, and cost per message on a real-Gmail account.
 2. **Self-host IBM Plex Sans** (drop the Google Fonts link).
 3. **Final tests:** full suite on fresh data, plus a manual real-Gmail pass on the live app.
 4. **Writeup:** include the privacy tradeoff (bodies go to the AI provider, capped, not stored) and the limitations below.
@@ -537,3 +537,38 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - **Quality note, not fixed:** the rejections answer cited application **ids** instead of company names, because it didn't call `list_applications`. A one-line prompt change would fix it ("name applications by company, never by id"). Left for the user to decide.
 
 **Not verified yet:** the deployed app; a real-Gmail account's cost per message; the panel's look on a phone.
+
+**Merged, pushed and deployed** `e42b379`. Signed-out checks: 401 on `/api/ai/chat`, `/api/ai/chats`, the agent tools and `sync`; no secrets in prd.
+
+---
+
+## 2026-11-19: Bug: "Ask the assistant" crashed the live board (branch `fix/assistant-scope`)
+
+**Reported by the user:** clicking **Ask the assistant** replaced the board with "useQuery('ai-messages'): No scope found. Wrap this hook in a RecordScope…".
+- **User's hypotheses:** the installer's `/assistant` page had its own `RecordScope` that was lost when the page was deleted; or the chat permission override broke schema registration.
+- **Asked:** state the cause before fixing; fix it as the installer intended; add a Playwright test that opens the real panel; explain why the tests missed it; deploy.
+- The user switched to auto mode for this fix.
+
+**Investigation:**
+1. **The installer's page** (`features/ai-chat/src/AiChatPage.tsx`) has no `RecordScope`. It relies on the layout's `RecordScope(SCOPE_ID, schemas)`, exactly as `/board` does. Hypothesis 1 ruled out.
+2. **When `useQuery` throws:** only when it finds neither a scope entry nor a `RecordContext` at all. But the board's own `useQuery` works in the same tree, so the panel had to be seeing a different React context.
+3. **Reproduced on live** with a throwaway Playwright run (Board Reviewer): same error screen. Locally, on the dev server, the panel worked.
+4. **The live bundle** has **two copies** of the SDK client: `index-CuRg-DoW.js` and `dist-DV8B2M27.js`, each with its own `createContext`. The layout's `RecordProvider`/`RecordScope` and the board's hooks import the `dist-*` copy; `ChatPanel` and `ProposalCard` import the `index-*` copy, whose context is never provided.
+5. **Two wrong turns, both checked and dropped:**
+   - "A different SDK version": wrong, because the same text is in the installed 0.44.2.
+   - "The deploy's `DEEPSPACE_DOCUMENTATION_BASE_URL`": wrong, because the split appeared without any variable.
+6. **The real variable is the shell.** Building in PowerShell from `C:\…` gives one copy (`index-DfU-Y1IQ.js`). Building in Git Bash from `/c/…` (a lowercase `c:\`) gives the split bundle, with the same hashes as live. On Windows, Rollup treats `C:/…/deepspace/dist/index.js` and `c:/…` as two modules. I had run `deepspace deploy` from Git Bash after the PowerShell push failed. Hypothesis 2 ruled out: `ai-messages` is registered; the hook was on another module instance.
+
+**Cause:** a build-environment bug from my deploy step, not app code. Nothing in the installer's intended setup was missing, so there's no code fix to make.
+
+**Fix:**
+- Deploy rule, in ARCHITECTURE.md → Build and deploy: deploy from PowerShell at uppercase `C:\`, never from Git Bash. Pushing from Bash is fine; only the build is affected.
+- Redeployed the same code, built that way.
+
+**Tests:**
+- New `tests/assistant.live.ts` plus `tests/playwright.live.config.ts`: a post-deploy check against the live bundle. It opens the real panel (no mocks, no model call) and checks the empty state, an editable textbox, no "Something went wrong", no page errors, and the board still there. **It failed against the broken deploy before the fix**, as intended.
+- `board.spec.ts` now also checks the real panel's empty state right after opening.
+
+**Why the existing tests missed it:** the suite runs against the Vite dev server, which serves unbundled modules from one module graph, so the duplicate can't happen there. `board.spec.ts` did open the real panel, and it passed. The bug exists only in a production bundle built from a lowercase-drive path, and nothing tested the deployed bundle until now.
+
+**Verified by the agent:** vitest 80/80; Playwright 14/14 on fresh local data; the live check before the fix (fails) and after the redeploy (results below).
