@@ -28,6 +28,11 @@ const RATE_LIMIT_MS = 10 * 60 * 1000
 // after an external security review (2026-11-20).
 export const APP_SYNC_DAILY_LIMIT = 100
 const DAY_MS = 86_400_000
+// Per-user demo limit, so one user's clear-and-reload loop can't use up the
+// app-wide cap for everyone. A 24-hour window from the first counted demo sync.
+export const DEMO_DAILY_LIMIT = 5
+const DEMO_UNAVAILABLE_MESSAGE =
+  "Demo data isn't available once you've synced Gmail, so demo and real applications never mix."
 const GMAIL_CREDITS_MESSAGE =
   'Gmail sync needs DeepSpace credits on your account. Try demo data to see how applytrack works.'
 const MAX_MESSAGES = 100 // per sync; keeps outbound calls per request ~200 (no bulk write API)
@@ -499,7 +504,12 @@ async function queryAll<T extends Record<string, unknown>>(
   }
 }
 
-type SyncStateRow = { lastSyncAt?: string; cursorAt?: string | null }
+type SyncStateRow = {
+  lastSyncAt?: string
+  cursorAt?: string | null
+  demoWindowStart?: string
+  demoCount?: number
+}
 type AppUsageRow = { day: string; syncs?: number }
 
 /**
@@ -525,6 +535,11 @@ async function syncSlot(tools: ActionTools, userId: string, now: number) {
     Number.isFinite(last) && now - last < RATE_LIMIT_MS
       ? Math.ceil((RATE_LIMIT_MS - (now - last)) / 1000)
       : 0
+  const demoStart = Date.parse(row?.demoWindowStart ?? '')
+  const demoInWindow = Number.isFinite(demoStart) && now - demoStart < DAY_MS
+  const demoCount = demoInWindow ? (row?.demoCount ?? 0) : 0
+  const demoRetryAfterSeconds =
+    demoCount >= DEMO_DAILY_LIMIT ? Math.ceil((demoStart + DAY_MS - now) / 1000) : 0
   const appSyncs = usage.success ? (usage.data.record.data.syncs ?? 0) : 0
   const appRetryAfterSeconds =
     appSyncs >= APP_SYNC_DAILY_LIMIT ? Math.ceil((Date.parse(`${day}T00:00:00.000Z`) + DAY_MS - now) / 1000) : 0
@@ -545,9 +560,16 @@ async function syncSlot(tools: ActionTools, userId: string, now: number) {
   return {
     retryAfterSeconds,
     appRetryAfterSeconds,
+    demoRetryAfterSeconds,
     cursorAt: row?.cursorAt || undefined,
     claim: async (source: Source) => {
       if (source === 'gmail') await write({ lastSyncAt: new Date(now).toISOString() })
+      else
+        await write(
+          demoInWindow
+            ? { demoCount: demoCount + 1 }
+            : { demoWindowStart: new Date(now).toISOString(), demoCount: 1 },
+        )
       await countAppSync()
     },
     setCursor: (cursorAt: string) => write({ cursorAt }),
@@ -581,6 +603,21 @@ export const sync: ActionHandler<Env> = async ({ userId, params, tools, env }) =
       code: 'app_limited',
       error: `Sync has reached today's limit for everyone. Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`,
       details: { retryAfterSeconds: slot.appRetryAfterSeconds },
+    }
+  }
+  if (source === 'demo') {
+    // Server-enforced, not just hidden in the UI: demo and real data never mix.
+    if (await hasGmailRows(tools, userId)) {
+      return { success: false, code: 'demo_unavailable', error: DEMO_UNAVAILABLE_MESSAGE }
+    }
+    if (slot.demoRetryAfterSeconds > 0) {
+      const hours = Math.max(1, Math.ceil(slot.demoRetryAfterSeconds / 3600))
+      return {
+        success: false,
+        code: 'demo_limited',
+        error: `You've loaded demo data ${DEMO_DAILY_LIMIT} times today. Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`,
+        details: { retryAfterSeconds: slot.demoRetryAfterSeconds },
+      }
     }
   }
 
@@ -772,6 +809,16 @@ async function deleteRows(tools: ActionTools, where: { userId: string; source?: 
     }
   }
   return deleted
+}
+
+/** Does the caller have any Gmail-sourced application or email row? */
+async function hasGmailRows(tools: ActionTools, userId: string): Promise<boolean> {
+  for (const collection of ['applications', 'emails']) {
+    const res = await tools.query(collection, { where: { userId, source: 'gmail' }, limit: 1 })
+    if (!res.success) throw new Error(`query ${collection} failed: ${res.error}`)
+    if (res.data.records.length > 0) return true
+  }
+  return false
 }
 
 /** Remove only the caller's demo rows (the board's "Clear demo data"). */

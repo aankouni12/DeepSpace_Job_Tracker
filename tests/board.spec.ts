@@ -5,7 +5,8 @@
  * Gmail with Google mocked via page.route (CLAUDE.md: tests mock Google OAuth).
  *
  * Needs an account with no data (this spec deletes it at the end). Demo syncs
- * aren't rate-limited per user, so the spec can re-run right away.
+ * aren't rate-limited per 10 minutes, but are limited to 5 per user per 24
+ * hours, so after 5 local runs in a day the spec skips itself and says so.
  */
 import { test, expect, findTestAccountByName } from 'deepspace/testing'
 
@@ -30,8 +31,9 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
   await page.getByRole('button', { name: 'Try with demo data' }).click()
   const status = page.getByRole('status').first()
   test.skip(
-    await status.getByText('Synced recently').isVisible().catch(() => false),
-    'Board Reviewer is rate-limited from a run less than 10 minutes ago.',
+    await status.getByText(/times today/).isVisible().catch(() => false),
+    'Board Reviewer has used its 5 demo syncs for today (each run deletes and reloads its demo). ' +
+      'rm -rf .wrangler/state for a fresh local run.',
   )
   await expect(page.getByTestId('application-card')).toHaveCount(5, { timeout: 120_000 })
   await expect(page.getByTestId('lane-offer').getByText('Northwind Robotics', { exact: true })).toBeVisible()

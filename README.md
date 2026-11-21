@@ -4,6 +4,8 @@ A job application tracker built on [DeepSpace](https://docs.deep.space). It read
 
 **Live:** https://applytrack.app.space. Use **Try with demo data** on the board to try it without connecting Gmail.
 
+Gmail sync needs DeepSpace credits. Reviewers can try everything with demo data.
+
 ![The applytrack board with demo data](docs/board.png)
 
 ## DeepSpace features used
