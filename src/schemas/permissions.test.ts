@@ -149,20 +149,24 @@ describe('assistant chats and messages', () => {
   })
 })
 
-describe('appUsage (app-wide assistant counter)', () => {
-  const row = { createdBy: JOB, data: { day: '2026-11-19', assistantMessages: 5 } }
-  const appUsage = schemas.find((s) => s.name === 'appUsage')!
+describe('usageTickets (atomic usage limits)', () => {
+  const row = { createdBy: JOB, data: { scope: `demo-user-${ALICE}-2026-11-21`, n: 1 } }
+  const tickets = schemas.find((s) => s.name === 'usageTickets')!
 
   it('is closed to every role, admin included: no read, create, update or delete', () => {
-    expect(appUsage).toBeDefined()
+    expect(tickets).toBeDefined()
     for (const role of ['*', 'viewer', 'member', 'admin']) {
       for (const user of [ALICE, JOB]) {
-        expect(canRead(appUsage, role, row, user)).toBe(false)
-        expect(canUpdate(appUsage, role, row, user)).toBe(false)
-        expect(canDelete(appUsage, role, row, user)).toBe(false)
+        expect(canRead(tickets, role, row, user)).toBe(false)
+        expect(canUpdate(tickets, role, row, user)).toBe(false)
+        expect(canDelete(tickets, role, row, user)).toBe(false)
       }
-      expect(canCreate(appUsage, role)).toBe(false)
+      expect(canCreate(tickets, role)).toBe(false)
     }
+  })
+
+  it('the old appUsage counter collection is gone', () => {
+    expect(schemas.some((s) => s.name === 'appUsage')).toBe(false)
   })
 })
 

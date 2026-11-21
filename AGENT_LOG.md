@@ -4,58 +4,68 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 ---
 
-## Next session (updated 2026-11-20)
+## Next session (updated 2026-11-21)
 
-**All features are done.** Live at https://applytrack.app.space, deployed from `main` @ `6fa40c0` (= `origin/main`):
-- Platform sign-in; read-only Gmail connection (`gmailRead` only).
-- **Data model** with per-user permissions: `applications`, `emails`, `syncState`, plus `appUsage`, which is closed to every role. The `ai-chats` and `ai-messages` collections are own-rows-only, admin included, and (on `fix/security-review`) no client can update them.
+**The app is complete. Only the writeup and the submission remain** (hard deadline Saturday 2026-11-21, 11:59 PM ET; aim for early evening).
+
+**Deploy status:** production runs `ef90d42`, **verified by the user on production on a fresh account (2026-11-21)**. The final security fixes (branch `final/checks`) close a HIGH issue that is live in `ef90d42`, so they **need a deploy** after the user pushes.
+
+What the app does (as of `final/checks`):
+- Platform sign-in; read-only Gmail connection (`gmailRead` only); a static landing page.
+- **Data model** with per-user permissions:
+  - `applications`, `emails` and `syncState` are owner-read, admin included; clients can change only an application's `status`.
+  - `ai-chats` and `ai-messages` are owner-read and delete-own, with no client create or update.
+  - `usageTickets` (atomic usage limits) is closed to every role.
+- **Only the routes the app uses:** no generic integration proxy, no file storage, no unused realtime rooms.
 - **`sync` server action** (Gmail and demo):
   - user-tuned Gmail query, paging and cursor, up to 100 emails;
   - classification from the email body, company/role merging, and status that only moves forward;
-  - 10-minute rate limit per user, plus (on `fix/security-review`) 100 syncs per UTC day app-wide; owner-billed AI.
-- **`deleteMyData`**, with a button in Settings.
-- **Pipeline board:** first-run screen, live lanes, status dropdown, email timeline, Sync / Connect / Load demo, and sync on open after 24 hours.
+  - limits (all atomic tickets, so parallel requests can't get past them):
+    - a Gmail sync that classifies new emails: once per 10 minutes per user;
+    - demo: 5 per UTC day per user, and refused once the user has Gmail data;
+    - app-wide per UTC day: 100 Gmail syncs and, separately, 100 demo syncs;
+    - a sync with nothing new costs no AI and uses nothing.
+  - A Gmail sync replaces demo rows; a 402 shows the credits message.
+- **`clearDemoData`** and **`deleteMyData`**.
+- **Pipeline board:** first-run screen, live lanes, status dropdown, email timeline, Demo data label and Clear demo data, Sync / Connect, and sync on open after 24 hours.
 - **AI assistant** (board panel):
   - three read-only tools that see email metadata only; status changes need a Confirm click;
-  - stale proposals are disabled;
-  - scope limited to the job search;
+  - stale proposals are disabled; scope limited to the job search;
   - owner-billed Haiku 5.5 with 2,000 output tokens, 4 tool calls and 30,000 characters of history;
-  - 30 messages per user per day and 200 per day app-wide;
-  - "(reply shortened)" when a reply still hits the cap.
-- **Demo vs Gmail** (on `fix/security-review`): demo isn't rate-limited per user; limits are claimed only when something new goes to the AI; a Gmail sync replaces demo rows; a 402 shows the credits message; Demo data label and Clear demo data on the board.
-- **Demo limits** (on `fix/demo-limits`): 5 demo syncs per user per 24 hours; the server refuses demo once the user has any Gmail data.
-- **Tests:** 120 unit, plus 2 real-model tests (`RUN_MODEL_TESTS=1`); 14 Playwright; 1 post-deploy live check (`tests/assistant.live.ts`).
+  - 30 messages per user per UTC day and 200 per day app-wide (atomic); chat titles capped at 100 characters; "(reply shortened)" when a reply still hits the cap.
+- **Tests:** see the 2026-11-21 final-checks entry for the final counts. There are also 2 real-model tests (`RUN_MODEL_TESTS=1`) and a post-deploy live check (`tests/assistant.live.ts`).
 - **Workflow:** the agent commits and merges locally, and the user pushes. Deploy only when `main` = `origin/main`, from PowerShell at `C:\`, then run the live check.
 
-**Friday 2026-11-20 (polish, test, write):**
-1. **Polish:**
-   - ~~Self-host IBM Plex Sans; landing page; README~~ (done on `feature/polish`; README needs `docs/board.png` from the user).
-   - If time allows, a sync progress message.
-2. **A full reviewer test on a brand-new account:** sign-in, demo data, board, the assistant (questions, decline, propose/Confirm/Cancel, stale cards), and delete.
-3. **Draft the writeup:**
-   - the privacy tradeoff: email bodies go to the AI provider, capped at 1,500 characters, never stored;
-   - assistant cost controls and worst-case cost;
-   - the limitations below.
+**Writeup topics:**
+- the privacy tradeoff: email bodies go to the AI provider, capped at 1,500 characters, never stored;
+- assistant and sync cost controls and the worst-case cost (table below);
+- the limitations below.
 
-**Saturday 2026-11-21:** final checks, and **submit by early evening** (the hard deadline is 11:59 PM ET).
+**What I'd do next:**
+- **A read-only sample board for signed-out visitors:** a pre-sorted board, with no AI calls and nothing saved, so people can preview the app before creating an account.
+  - **Why it wasn't built now:** today's demo runs through the real sync action, and its AI calls are owner-billed. An anonymous demo would have no user to rate-limit, so only the app-wide cap would stand between it and the owner's bill. A static, pre-sorted board avoids that, but it was more scope than the deadline allowed.
 
 **Open risks and known limitations:**
 - Outbound calls per request: a 100-email sync is about 175 calls and took about 76 s. Both work, but the platform limits aren't documented, so the cap stays at 100.
 - A first sync reaches only the newest 100 matching emails, about a month here. More than 100 new matches between syncs means the oldest are missed.
-- Rate-limit race: two requests in the same instant can both pass (accepted on purpose; bounded cost).
-- **App-wide sync cap:** one user can now use at most 5 of the 100 daily syncs on demo (`fix/demo-limits`). Many accounts together could still reach the cap, which is what it's for.
+- **Parallel syncs from one user (LOW, known):** if several of one user's parallel syncs win limit slots at the same moment, they classify the same emails, and all but the first fail their writes on the `applications` uniqueness rule (HTTP 500). The data stays consistent, and the AI spent stays within the limits. The UI never sends parallel syncs. (Seen in the real-RecordRoom check, 2026-11-21.)
+- **App-wide caps:** one user can use at most 5 of the 100 daily demo syncs. Demo and Gmail have separate caps, so demo abuse can't block real syncs. Many accounts together could still reach a cap, which is what the caps are for.
 - **Zero-credit accounts can't connect Gmail:** the api-worker checks credits before OAuth, so "Connect Gmail" returns 402 and never reaches Google's consent screen. The credits message says so, and the README tells reviewers to use demo data (the user decided that's enough).
-- **Possible flaky Playwright test (unexplained):** on 2026-11-20, one full-suite run before Part 2 of `fix/security-review` failed one `toHaveCount` check, with one skip, and the failing test's name wasn't captured. Every run since (4 full runs, 2 of them on fresh state) passed. If it recurs, capture the test name before re-running.
+- **Possible flaky Playwright test (unexplained):** on 2026-11-20, one full-suite run before Part 2 of `fix/security-review` failed one `toHaveCount` check, with one skip, and the failing test's name wasn't captured. Every run since has passed. If it recurs, capture the test name before re-running.
 - An email that never names its company is recorded as `not_job_related` and not retried.
 - Card count is 37 against the user's expected 29–35; there may still be some role splits (not checked by name).
 - Interview definition: AI-agent screenings count as Applied (Stellantis). That's a one-line prompt change if the user wants otherwise.
-- **Owner AI cost, worst case per day** (estimates; both paths have an app-wide daily cap since `fix/security-review`):
+- **Owner AI cost, worst case per day** (estimates, recalculated 2026-11-21 with the integration proxy closed and the caps atomic):
 
   | Path | Cap (per UTC day, all accounts) | Worst case per day |
   |---|---|---|
-  | Sync classification ($0.0012 per demo sync, ~$0.015–0.02 per 100-email Gmail sync) | 100 syncs | ≈ $0.12 all demo; ≈ **$2.00** all Gmail |
+  | Gmail sync classification (~$0.015–0.02 per 100-email sync) | 100 syncs | ≈ **$2.00** |
+  | Demo sync classification ($0.0012 per sync) | 100 syncs, separate from Gmail | ≈ $0.12 |
   | Assistant ($0.0005–0.0012 per message measured) | 200 messages | ≈ **$3.00** at this app's data sizes; ≈ $5.00 at the theoretical ceiling |
-  | **App total** | | ≈ **$5.00**; ≈ $7.00 at the theoretical ceiling |
+  | Integrations from the browser | none reachable (was: 36 owner-billed, uncapped) | $0 |
+  | **App total** | | ≈ **$5.12**; ≈ $7.12 at the theoretical ceiling |
+
+  Before 2026-11-21 the earlier "$5/day" figure did not hold: the open integration proxy had no cap, and parallel requests could get past every counter.
 
   Haiku's hidden thinking counts against the assistant's 2,000-token cap and can't be turned off through the platform.
 - **Stale proposals and the Confirm write are enforced only in the browser.** The schema still limits writes to `status` on the user's own rows.
@@ -919,3 +929,85 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 - **Cosmetic:** it was captured as the demo sync finished, so the status line read "Syncing. Cards appear as each batch is sorted." and the buttons were greyed out.
 
 **Retaken (the user's request):** a temporary spec (deleted after use) on the local dev server, signed in as the Reviewer Two test account, whose demo board was already loaded, so no new sync and no AI cost. Before the shot it waited for all five cards in their final lanes, a sync status without "Syncing", and enabled **Clear demo data**, **Connect Gmail** and **Ask the assistant** buttons, then moved the mouse away. Checked by viewing it: only the five fictional demo companies with the "Demo data" label; the account chip shows "Reviewer Two" and no email appears; 1280×720, 41 KB.
+
+---
+
+## 2026-11-21: Final checks and final security fixes (branch `final/checks`)
+
+**Verified by the user on production on a fresh account (2026-11-21), before this branch:**
+- landing page, Get started, sign-in;
+- demo loaded twice in a row; card timeline; status change;
+- an assistant answer and a scope decline;
+- Clear demo data;
+- a Gmail re-sync with nothing new, running right away.
+
+**Asked:**
+1. README: fix the out-of-date limits line and check the whole README against the code.
+2. AGENT_LOG: log the user's production test; "Next session" says only the writeup and the submission remain; add "What I'd do next".
+3. A final test run from a clean state.
+4. A security review of the **whole app**, not just a diff.
+5. An ARCHITECTURE check.
+6. Commit, merge, and say when to push.
+
+**Final test run before any fixes** (clean `.wrangler/state`): `tsc` and eslint (whole repo) clean; vitest 120 passed (+2 real-model skipped); Playwright 14/14.
+
+### HIGH: the integration proxy billed the owner for 36 integrations
+
+- **Found by the agent's whole-app security review. Missed by the user's external review and by every earlier `/security-review`, which only looked at each branch's diff.**
+- **Present since the scaffold:** in the first commit (`a202464`, 2026-11-17), and live through `ef90d42`.
+- **The flaw:** `src/server/http-routes.ts` had a generic `/api/integrations/:name/:endpoint` proxy. It forwarded `APP_OWNER_JWT` for every integration not listed in `src/integrations.ts`, and only `google` and `composio` were listed (user-billed).
+- **The live catalog** (`GET /api/integrations`) had 38 integrations, so **36 were billed to the owner**. They include `anthropic`, `openai`, `gemini`, `fal`, `elevenlabs`, `serpapi` and `email`.
+- **Exploit:** sign-up is open. Any account could call them with its own session token, with no limit or cap.
+- **Not exercised:** the agent didn't try it, because that would spend the owner's credits. Found by reading the code and the public catalog.
+- **The user's decision:** lock the proxy down to only what the browser uses, after checking that nothing else is called.
+  - The browser only calls `GET /api/integrations/status` (`SyncControls.tsx`).
+  - Gmail is read server-side by the sync action (`createActionTools` → `callIntegration`).
+- **Fix:** removed the generic proxy, the catalog and the disconnect routes; `/status` stays. Every other `/api/integrations/*` path gets the existing JSON 404 for unknown `/api` paths.
+
+### MEDIUM: usage limits could be bypassed by parallel requests
+
+- **Found by the user's own review.** Every limit was read-check-write across separate tool calls, so ~50 parallel demo syncs or chat messages all read the same count and passed.
+- **The user proposed tickets with deterministic IDs** (`demo-<userId>-<windowStart>-<n>`, …) and asked the agent to verify that a create with an existing ID fails.
+- **It doesn't: `records.create` with an existing `recordId` updates that row** (deepspace 0.44.x `putRecord`: `isUpdate = existing !== null`, then `UPDATE`). So deterministic IDs can't be the lock.
+- **What is atomic** is `uniqueOn`: `putRecord` runs the duplicate check (`SELECT … LIMIT 1` on the `uniqueOn` columns) and the `INSERT` in one synchronous stretch, with no `await`, inside the Durable Object.
+- **Built:**
+  - A closed `usageTickets` collection (`scope`, `n`, `uniqueOn: ['scope', 'n']`, SDK-generated IDs).
+  - `src/server/usage-tickets.ts`: `claimTicket` reads the taken slots, then creates the first free one, moving to the next slot on "Duplicate"; plus `releaseTicket` and `isFull` (an early, non-atomic check before paid work).
+  - All limits moved onto tickets, and `appUsage` was removed:
+    - Gmail: one per user per 10-minute bucket;
+    - demo: 5 per user per UTC day;
+    - **separate app-wide caps:** Gmail 100 and demo 100 per UTC day, so demo abuse can't block real syncs;
+    - assistant: 30 per user per UTC day, 200 app-wide.
+  - **Deviation from the proposal, explained:** windows are UTC days (plus 10-minute buckets for Gmail), not "24 hours from the first use". A rolling window's start time is itself a racy read-then-write.
+  - The old `syncState` columns stay in the schema but are no longer written.
+- **Tests:**
+  - **20 parallel claims against a limit of 5: exactly 5 succeed** (`usage-tickets.test.ts`, with a fake that models RecordRoom).
+  - Through the real actions: 20 parallel demo syncs, exactly 5 pass; 10 parallel Gmail syncs, exactly 1 passes; 50 parallel chat messages, exactly 30 pass; 40 users with 5 app slots left, exactly 5 pass and every refused user's slot is released.
+  - **Mutation-checked:** switching to deterministic record IDs makes all 20 "succeed".
+- **Verified against the real local RecordRoom** (temporary spec, deleted): 20 parallel demo syncs as Reviewer Two with 4 slots left gave **exactly 4 through, 16 `demo_limited`**.
+  - Of the 4, 3 returned HTTP 500. The server log showed `create application failed: Duplicate … key=northwind robotics|software engineer intern`: the parallel winners classified the same emails, and all but the first failed their writes.
+  - The data stayed consistent, and the AI spent stayed within the limit. Recorded as a LOW known item; the UI never sends parallel syncs.
+
+### LOW: less attack surface
+
+- **Removed `/ws/yjs`, `/ws/canvas`, `/ws/presence`, `/ws/jobs`.** None were used; with no `documents` collection, any signed-in user was a member of any Yjs doc. `/ws/cron` stays (admin-only control, not on the user's list). The Durable Object classes stay bound, because removing one needs a migration.
+- **Removed `/api/files/*`:** the app stores no files.
+- **Chat titles** on create and rename are clipped to 100 characters (`clipTitle`).
+- **Checked first** that nothing needs them: no app code uses the SDK's file, Yjs, canvas, presence or jobs hooks. A new Playwright check confirms the board opens only the records socket.
+
+**Tests added (Playwright, signed in):**
+- 404 for `openai`, `email` and `google/gmail-inbox` through the old proxy path, for the catalog, for disconnect, and for `/api/files/*`;
+- `/api/integrations/status` still 200;
+- the board's app sockets are only `/ws/<scope>`. The agent's first version also counted Vite's dev HMR socket at `/` and failed; `smoke.spec.ts` already excludes that socket, so the test now does too.
+- Gmail sync through the action still reaches the real `gmail-inbox` (the existing credits test gets its real 402).
+
+**Agent mistake, caught by a test:** an old unit test simulated "a later Gmail sync" only by editing `lastSyncAt`. With the 10-minute limit now also a ticket, it failed; the test now clears that user's Gmail tickets too.
+
+**Worst case recalculated** (Next session, top):
+- About **$5.12 a day**: Gmail $2.00 + demo $0.12 + assistant $3.00. About $7.12 at the theoretical ceiling.
+- **$0 from integrations.**
+- The earlier "$5/day" figure did not hold before this branch: the proxy had no cap, and parallel requests could get past the counters.
+
+**Verified by the agent:** `tsc` and eslint clean; vitest **134 passed** (+2 real-model skipped); Playwright **15/15** on a clean `.wrangler/state`.
+
+**Needs a deploy**, because the HIGH issue is live in `ef90d42`.

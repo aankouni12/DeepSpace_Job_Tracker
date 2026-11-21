@@ -7,17 +7,12 @@
  */
 
 import type { Hono } from 'hono'
-import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import {
   apiWorkerFetch,
   authWorkerFetch,
   BROWSER_PROXY_ROUTES,
-  integrationPath,
   isPlatformReservedPath,
-  lookupOwn,
-  platformWorkerFetch,
   resolveAppRole,
-  resolveSessionReadAuth,
   SESSION_COOKIE,
   verifyAgentToken,
   verifyJwt,
@@ -29,7 +24,6 @@ import {
   nativeAuthToken,
 } from 'deepspace/worker'
 import type { ExpoAuthBridgeOptions, JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
-import { integrations } from '../integrations.js'
 import type { AppContext, Env } from '../../worker.js'
 
 function jwtConfig(env: Env): JwtVerifierConfig {
@@ -185,16 +179,15 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
     return stub.fetch(c.req.raw)
   })
 
-  // Integrations proxy → api-worker.
-  app.get('/api/integrations', async (c) => {
-    try {
-      const res = await apiWorkerFetch(c.env, '/api/integrations')
-      return new Response(res.body, { status: res.status, headers: res.headers })
-    } catch {
-      return c.json({ error: 'Failed to fetch integration catalog' }, 502)
-    }
-  })
-
+  // Integrations: the browser needs only the caller's own connection status.
+  // The scaffold's catalog, disconnect and generic `/:name/:endpoint` proxy
+  // were removed (whole-app security review, 2026-11-21): the generic proxy
+  // forwarded APP_OWNER_JWT for every integration not listed in
+  // src/integrations.ts, so any signed-in account could spend the owner's
+  // credits on 36 integrations. Gmail is read server-side by the sync action
+  // (createActionTools → callIntegration). Every other /api/integrations/*
+  // path falls through to the JSON 404 in registerStaticRoutes.
+  //
   // OAuth connection state is always user-billed, so forward the caller JWT.
   app.get('/api/integrations/status', async (c) => {
     const auth = await resolveAuth(c.req.raw, c.env)
@@ -210,129 +203,14 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
     }
   })
 
-  app.delete('/api/integrations/oauth/:provider/disconnect', async (c) => {
-    const auth = await resolveAuth(c.req.raw, c.env)
-    if (!auth) return c.json({ error: 'Sign in required' }, 401)
-    const token = c.req.header('Authorization')?.slice(7)
-    const provider = c.req.param('provider')
-    try {
-      const res = await apiWorkerFetch(
-        c.env,
-        `/api/integrations/oauth/${encodeURIComponent(provider)}/disconnect`,
-        {
-          method: 'DELETE',
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        },
-      )
-      return new Response(res.body, { status: res.status, headers: res.headers })
-    } catch {
-      return c.json({ error: 'Disconnect proxy failed' }, 502)
-    }
-  })
-
-  app.all('/api/integrations/:name/:endpoint', async (c) => {
-    const integrationName = c.req.param('name')
-    // Params arrive decoded, so `..%2F..%2Fapi%2Fusers` would otherwise
-    // reach another api-worker route with the owner's token. Plain
-    // identifiers only, and own keys only for the config.
-    const target = integrationPath(integrationName, c.req.param('endpoint'))
-    if (!target) return c.json({ error: 'Unknown integration' }, 404)
-    const config = lookupOwn(integrations, integrationName)
-    const billingMode = config?.billing ?? 'developer'
-
-    // Sign-in is required unless the app opts this integration into anonymous
-    // use; developer billing would otherwise let any visitor spend the owner's
-    // credits. User billing always needs a caller to bill.
-    const auth = await resolveAuth(c.req.raw, c.env)
-    if (!auth && (billingMode === 'user' || !config?.anonymous)) {
-      return c.json({ error: 'Sign in required for this integration' }, 401)
-    }
-
-    const headers: Record<string, string> = {
-      'Content-Type': c.req.header('Content-Type') ?? 'application/json',
-    }
-
-    // The api-worker bills the JWT subject: developer mode uses the app owner;
-    // user mode forwards the caller. There is no client billing override.
-    if (billingMode === 'developer') {
-      headers['Authorization'] = `Bearer ${c.env.APP_OWNER_JWT}`
-    } else {
-      const token = c.req.header('Authorization')?.slice(7)
-      if (token) headers['Authorization'] = `Bearer ${token}`
-    }
-
-    // Identify this app for per-app integrations. Pre-first-deploy there is no
-    // token, so omit both headers and let the api-worker fail closed.
-    if (c.env.APP_IDENTITY_TOKEN) {
-      headers['x-app-identity-token'] = c.env.APP_IDENTITY_TOKEN
-      headers['x-app-id'] = c.env.DEEPSPACE_APP_ID
-    }
-
-    const hasBody = c.req.method !== 'GET' && c.req.method !== 'HEAD'
-    const body = hasBody ? await c.req.text() : undefined
-
-    try {
-      const res = await apiWorkerFetch(c.env, target, {
-        method: c.req.method,
-        headers,
-        body,
-      })
-      return new Response(res.body, { status: res.status, headers: res.headers })
-    } catch {
-      return c.json({ error: 'Integration proxy failed' }, 502)
-    }
-  })
 }
 
-/** Register scoped-file and authenticated browser-to-platform proxies. */
+/** Register the authenticated browser-to-platform proxy. */
 export function registerPlatformProxyRoutes(app: Hono<AppContext>): void {
-  // Scoped R2 files → platform-worker. The app has no local R2 binding; the
-  // platform bucket scopes keys to the verified app and, by default, user.
-  app.all('/api/files/*', async (c) => {
-    // A same-origin GET/HEAD with no bearer is identified by the app-origin
-    // session cookie, so a private file URL renders in <img>/<audio>/<video>.
-    // The fallback lives here, not in resolveAuth, which also gates writes.
-    const auth =
-      (await resolveAuth(c.req.raw, c.env)) ?? (await resolveSessionReadAuth(c.req.raw, c.env))
-    const userId = auth?.userId ?? null
-
-    const url = new URL(c.req.url)
-    const platformUrl = new URL(c.req.url)
-    platformUrl.pathname = url.pathname.replace('/api/files', '/internal/files')
-
-    const headers = new Headers(c.req.raw.headers)
-    // platform-worker trusts x-user-id after app HMAC validation. Always remove
-    // caller input and derive it from the verified JWT.
-    headers.delete('x-user-id')
-    reassertAppIdentity(headers, c.env)
-    if (userId) headers.set('x-user-id', userId)
-
-    const resp = await platformWorkerFetch(
-      c.env,
-      new Request(platformUrl.toString(), {
-        method: c.req.method,
-        headers,
-        body: c.req.raw.body,
-      }),
-    )
-
-    // Rewrite platform URLs in JSON responses to use the app's origin (a HEAD
-    // answer has the content-type but no body).
-    const contentType = resp.headers.get('content-type') ?? ''
-    if (contentType.includes('application/json') && c.req.method !== 'HEAD') {
-      const body = (await resp.json()) as Record<string, unknown>
-      const rewriteUrl = (value: string) => value.replace(/^https?:\/\/[^/]+/, url.origin)
-      if (typeof body.url === 'string') body.url = rewriteUrl(body.url)
-      if (Array.isArray(body.files)) {
-        for (const file of body.files as Array<Record<string, unknown>>) {
-          if (typeof file.url === 'string') file.url = rewriteUrl(file.url)
-        }
-      }
-      return c.json(body, resp.status as ContentfulStatusCode)
-    }
-
-    return new Response(resp.body, { status: resp.status, headers: resp.headers })
-  })
+  // The scaffold's /api/files/* proxy (app file storage) was removed: nothing
+  // in this app stores files, and it let any signed-in account upload to the
+  // app's storage (whole-app security review, 2026-11-21). /api/files/* now
+  // gets the JSON 404 in registerStaticRoutes.
 
   // Same-origin browser proxy for authenticated SDK hooks. Keep this an exact
   // (method, path) allowlist: prefix matching would expose deploy/CLI routes.

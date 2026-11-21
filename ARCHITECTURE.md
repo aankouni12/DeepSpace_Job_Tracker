@@ -22,7 +22,7 @@ src/
   constants.ts             APP_NAME, APP_ID, SCOPE_ID = `app:${APP_ID}`
   nav.ts                   Navigation bar entries
   schemas.ts               Array of every collection schema (shared by worker and frontend)
-  schemas/                 One file per collection (users, settings, applications, emails, syncState, appUsage, ai-chat) + permissions.test.ts
+  schemas/                 One file per collection (users, settings, applications, emails, syncState, usageTickets, ai-chat) + permissions.test.ts
   pages/                   Routes. Folder determines what a page gets (see below)
     (app)/home.tsx           Redirects to /board
     (app)/(protected)/board.tsx     Pipeline board and first-run screen
@@ -35,19 +35,20 @@ src/
   lib/utils.ts             cn, callAction (POST /api/actions/:name with JWT), authedGet
   themes.css / themes.ts   "applytrack" theme: palette and status inks (--status-*)
   server/
-    http-routes.ts         Auth proxy, integrations proxy, files, static/SPA fallback
-    realtime-routes.ts     WebSocket routes to Durable Objects, with JWT verification
+    http-routes.ts         Auth proxy, Gmail connection status, /_deepspace allowlist, static/SPA fallback
+    realtime-routes.ts     WebSocket routes (records and cron rooms only), with JWT verification
     action-routes.ts       POST /api/actions/:name (server actions); createActionTools (RBAC-off server tools)
-  actions/index.ts         Server action registry: { sync, deleteMyData }
-  actions/sync.ts          sync (rate limit, fetch, classify, write) and deleteMyData (+ sync.test.ts)
+    usage-tickets.ts       Atomic usage limits: claimTicket / releaseTicket / isFull (+ .test.ts, .fake.ts)
+  actions/index.ts         Server action registry: { sync, deleteMyData, clearDemoData }
+  actions/sync.ts          sync (limits, fetch, classify, write), deleteMyData, clearDemoData (+ sync.test.ts)
   actions/demo-emails.ts   12 fictional demo emails: one prompt-injection attempt, one take-home, one rejection hidden in paragraph 2
   ai/
     tools.ts               buildTools: the assistant's 3 tools + system prompt (+ tools.test.ts)
     agent.ts               registerAgent: exposes the same tools over HTTP / MCP / browser, plus in-app chat
-    chat-routes.ts         Chat endpoints: fixed model, owner billing, per-user message limit (+ chat-routes.test.ts)
+    chat-routes.ts         Chat endpoints: fixed model, owner billing, message limits, title cap (+ chat-routes.test.ts)
   cron.ts                  Scaffold file, empty and unused (no scheduled sync; see Sync)
   jobs.ts                  Scaffold file, empty and unused (no background sync job; see Sync)
-  integrations.ts          Integration billing: google and composio are 'user'-billed
+  integrations.ts          Integration billing for server code: google and composio are 'user'-billed (the browser has no integration proxy)
 
 tests/                     Playwright: smoke.spec.ts, api.spec.ts (default run), collab.spec.ts (two-user sign-in), sync-demo.spec.ts, board.spec.ts
 public/                    Static files (favicon, robots.txt, _headers)
@@ -82,12 +83,17 @@ Generouted maps files to URLs. A parenthesised folder name is a group and does n
 
 **Worker (`worker.ts`).** A Hono app. Route registration order is part of the contract:
 
-1. `registerAuthAndIntegrationRoutes`: `/api/auth/*` (proxied to the DeepSpace auth worker), `/api/integrations/*` (proxied to the platform API worker with the caller's JWT)
-2. `registerRealtimeRoutes`: `/ws/*` WebSockets to Durable Objects
+1. `registerAuthAndIntegrationRoutes`: `/api/auth/*` (proxied to the DeepSpace auth worker); `GET /api/integrations/status` only (the caller's own connection state, with the caller's JWT); `/api/debug/*` (404 unless `ALLOW_DEBUG_ROUTES` is "true", which is never set on the deployed app, and admin only)
+2. `registerRealtimeRoutes`: `/ws/:roomId` (records room) and `/ws/cron/:roomId`
 3. `registerActionRoutes`: `POST /api/actions/:name`
 4. `registerAgent`: AI tools over HTTP / MCP / browser (`/_deepspace/agent/...`), and the in-app chat routes (`/api/ai/chat*`), on because the ai-chats schema exists
-5. `registerPlatformProxyRoutes`: `/api/files/*`, `/_deepspace/*`
-6. `registerStaticRoutes`: built assets, then the SPA shell for client routes
+5. `registerPlatformProxyRoutes`: `/_deepspace/*`, an exact (method, path) allowlist
+6. `registerStaticRoutes`: any other `/api/*` path gets a JSON 404; then built assets, then the SPA shell for client routes
+
+**Removed from the scaffold (whole-app security review, 2026-11-21).** Any path to these now gets the JSON 404 in step 6 (or, for `/ws/*`, no room):
+- **The generic integration proxy** `/api/integrations/:name/:endpoint`, plus the catalog and disconnect routes. It forwarded `APP_OWNER_JWT` for every integration not listed in `src/integrations.ts`, so any signed-in account could spend the owner's credits on 36 integrations (`anthropic`, `openai`, `gemini`, `fal`, `elevenlabs`, `email`, …). The browser only ever called `/status`; Gmail is read server-side by the sync action (`createActionTools` → `callIntegration`).
+- **`/api/files/*`**: the app stores no files.
+- **`/ws/yjs`, `/ws/canvas`, `/ws/presence`, `/ws/jobs`**: unused. With no `documents` collection, any signed-in user was a member of any Yjs doc.
 
 Middleware on every request wakes the cron room so schedules arm without waiting for a visitor.
 
@@ -97,8 +103,8 @@ Middleware on every request wakes the cron room so schedules arm without waiting
 |---|---|---|
 | `AppRecordRoom` | `RECORD_ROOMS` | The database: collections from `schemas.ts`, RBAC enforced per record, live sync over WebSocket |
 | `AppCronRoom` | `CRON_ROOMS` | Runs `src/cron.ts` tasks on an alarm. Unused: sync is on open, not scheduled |
-| `AppJobRoom` | `JOB_ROOMS` | Durable background jobs (`src/jobs.ts`). Unused: its queue is visible to all members (see Sync) |
-| `AppYjsRoom`, `AppCanvasRoom`, `AppPresenceRoom` | `YJS_ROOMS`, `CANVAS_ROOMS`, `PRESENCE_ROOMS` | Collaborative editing, canvas and presence. Not used by this app |
+| `AppJobRoom` | `JOB_ROOMS` | Durable background jobs (`src/jobs.ts`). Unused: its queue is visible to all members (see Sync). No route reaches it |
+| `AppYjsRoom`, `AppCanvasRoom`, `AppPresenceRoom` | `YJS_ROOMS`, `CANVAS_ROOMS`, `PRESENCE_ROOMS` | Collaborative editing, canvas and presence. Unused, and no route reaches them. The classes stay bound because removing one needs a Durable Object migration |
 
 The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOPE_ID`). It is keyed to the id, not the name, so a rename keeps the data.
 
@@ -113,8 +119,34 @@ The app's main record room is the instance named `app:<DEEPSPACE_APP_ID>` (`SCOP
 | `applications` | `applications-schema.ts` | One row per user, company and role | member/admin: read own, update own (`status` only); no client create or delete |
 | `emails` | `emails-schema.ts` | Application timeline and sync ledger | member/admin: read own only |
 | `ai-chats`, `ai-messages` | `ai-chat-schema.ts` | Assistant chat history (SDK schemas). Written only by the chat routes | member/admin: read and delete own; **no client create or update** (admin overridden from the SDK's read-all and update-own). Stored rows are replayed to the model, and a stored `role: "system"` message becomes a system prompt, so clients must not edit `role`, `content` or `compactedSummary` (external security review, 2026-11-20). Renaming goes through `PATCH /api/ai/chats/:id` |
-| `appUsage` | `app-usage-schema.ts` | App-wide counters, one row per counter per UTC day: `assistant-YYYY-MM-DD` (`assistantMessages`, chat route) and `sync-YYYY-MM-DD` (`syncs`, sync action). Server-only | Closed to every role, admin included |
-| `syncState` | `sync-state-schema.ts` | One row per user (record ID = userId): `lastSyncAt` for the Gmail rate limit (demo syncs never write it), `cursorAt` for Gmail, `demoWindowStart` + `demoCount` for the per-user demo limit, `chatWindowStart` + `chatCount` for the assistant's message limit | member/admin: read own only. Not on `users`, because members can update their own `users` row |
+| `usageTickets` | `usage-tickets-schema.ts` | One row per use of a limited, owner-billed resource: `{ scope, n }`, `uniqueOn: ['scope', 'n']`. See "Usage limits" below. Server-only | Closed to every role, admin included |
+| `syncState` | `sync-state-schema.ts` | One row per user (record ID = userId): `lastSyncAt` (the last Gmail sync that classified something; shown as "Last synced", and the early 10-minute check), `cursorAt` for Gmail. `chatWindowStart`, `chatCount`, `demoWindowStart` and `demoCount` are no longer written (the limits moved to `usageTickets`); they stay in the schema to match rows already stored | member/admin: read own only. Not on `users`, because members can update their own `users` row |
+
+`appUsage`, the earlier app-wide counter collection, was removed (2026-11-21); its old production rows are no longer reachable from any schema.
+
+### Usage limits (`src/server/usage-tickets.ts`)
+
+Every limit on owner-billed work is a **ticket scope** with slots `1..limit`. Using the resource means creating the row `{ scope, n }` for a free slot:
+
+| Scope | Limit | Used by |
+|---|---|---|
+| `gmail-user-<userId>-<10-minute bucket>` | 1 | a Gmail sync that classifies new emails |
+| `sync-gmail-<UTC day>` | 100 (`APP_GMAIL_DAILY_LIMIT`) | every such Gmail sync, app-wide |
+| `demo-user-<userId>-<UTC day>` | 5 (`DEMO_DAILY_LIMIT`) | a demo sync that classifies |
+| `sync-demo-<UTC day>` | 100 (`APP_DEMO_DAILY_LIMIT`) | every such demo sync, app-wide (separate from Gmail, so demo abuse can't block real syncs) |
+| `assistant-user-<userId>-<UTC day>` | 30 (`CHAT_DAILY_LIMIT`) | an assistant message |
+| `assistant-app-<UTC day>` | 200 (`APP_DAILY_LIMIT`) | every assistant message, app-wide |
+
+- **Why tickets, not counters (the user's review, 2026-11-21):** a counter is read-check-write across separate tool calls, so ~50 parallel requests all read the same count and every one passes.
+- **Why it's atomic:**
+  - `uniqueOn: ['scope', 'n']` makes RecordRoom refuse a second create of the same slot with "Duplicate".
+  - In deepspace 0.44.x `putRecord`, the duplicate check and the `INSERT` run in one synchronous stretch, with no `await`, inside the Durable Object. So two requests can never both take slot `n`.
+  - Record IDs are left to the SDK: `records.create` with an existing `recordId` **updates** that row instead of failing (`putRecord`: `isUpdate = existing !== null`), so an ID can't be the lock.
+- **`claimTicket(scope, limit)`** reads the taken slots, then creates the first free one. On "Duplicate" (a parallel request took it), it tries the next slot. Any other error throws. **`releaseTicket`** gives a slot back when a later check refuses the work: a user slot is released when the app-wide one is full. **`isFull`** is a non-atomic early check, used to refuse before paid work such as a Gmail fetch.
+- **Scopes are built only from the verified `userId` and the server clock.**
+- **Windows are UTC days** (and 10-minute buckets for Gmail), not "24 hours from the first use": a rolling window's start would itself be a racy read-then-write.
+- **Verified against the real local RecordRoom:** 20 parallel demo syncs, with 4 slots left, gave exactly 4 through and 16 `demo_limited`. **Known side effect:** when one user's parallel syncs win slots at the same moment, they classify the same emails, and all but the first fail their writes on the `applications` uniqueness rule (HTTP 500). The data stays consistent, and the AI spent stays within the limits. The UI never sends parallel syncs, because the buttons are disabled while a sync runs.
+- Tickets are never deleted (one small row per use); a scope from a past day is simply never queried again.
 
 **`applications`**
 
@@ -186,12 +218,12 @@ So sync runs inside the user's own request:
    - **Load demo data** / **Try with demo data**;
    - **Sync Gmail** / **Connect Gmail**, which is the same call. A user without Gmail access gets `requiresOAuth` + `authUrl`, which opens in a new tab. There is no separate auth-URL endpoint (Google OAuth guide).
    - **Sync on open:** once per page load, when `GET /api/integrations/status` shows `gmailRead` and `syncState.cursorAt` is missing or more than 24 hours old. It uses `cursorAt`, not `lastSyncAt`, so a recent demo sync doesn't suppress the Gmail sync. A `rate_limited` result from an automatic sync is shown silently.
-2. **Rate limit checks** (read together in `syncSlot`):
-   - **Per user, Gmail only:** if the `syncState` row (record ID = userId) has `lastSyncAt` within 10 minutes, a Gmail sync returns `{ success: false, code: 'rate_limited', details: { retryAfterSeconds } }`. **Demo syncs are exempt** (reviewer fix, 2026-11-20): they're bounded by the app-wide cap below and their own per-user limit, and a demo sync with nothing new costs no AI at all.
+2. **Early refusals, before any paid work.** These read without claiming; the atomic claim in step 4 is what enforces the limits (scopes in "Usage limits" above).
+   - **Per user, Gmail only:** if `syncState.lastSyncAt` is within 10 minutes, a Gmail sync returns `{ success: false, code: 'rate_limited', details: { retryAfterSeconds } }`. **Demo syncs are exempt** (reviewer fix, 2026-11-20).
+   - **App-wide, separate for Gmail and demo:** if today's `sync-gmail-<day>` (or `sync-demo-<day>`) scope is full (100 each), the action returns `code: 'app_limited'`, "Gmail sync has reached today's limit for everyone." (or "Demo data has reached…"), "Try again in about N hours." This happens before any Gmail fetch or AI call. `SyncControls` shows `error` for any code other than `rate_limited`, so the UI needed no change.
    - **Per user, demo only:**
      - **Refused when the user has any Gmail data** (an `applications` or `emails` row with `source: 'gmail'`, checked server-side by `hasGmailRows`): `code: 'demo_unavailable'`, "Demo data isn't available once you've synced Gmail, so demo and real applications never mix." The UI hides the button too, but the server is the boundary.
-     - **At most 5 counted demo syncs per 24 hours** (`DEMO_DAILY_LIMIT`), on `syncState.demoWindowStart` + `demoCount`: the window starts at the first counted demo sync. At the limit: `code: 'demo_limited'`, "You've loaded demo data 5 times today. Try again in about N hours." So one user's Clear demo → Load demo loop can't use up the app-wide cap for everyone. Only demo syncs that send something to the AI count; `deleteMyData` and `clearDemoData` don't reset it.
-   - **App-wide (added after the external security review, 2026-11-20):** at most **100 syncs per UTC day across all accounts** (`APP_SYNC_DAILY_LIMIT` in `src/actions/sync.ts`), counted on the closed `appUsage` row `sync-YYYY-MM-DD`. At the cap, the action returns `{ success: false, code: 'app_limited', error: "Sync has reached today's limit for everyone. Try again in about N hours.", details: { retryAfterSeconds } }` before any Gmail fetch or AI call. `SyncControls` shows `error` for any code other than `rate_limited`, so the UI needed no change.
+     - **At most 5 demo syncs that classify, per UTC day** (`demo-user-<userId>-<day>`): `code: 'demo_limited'`, "You've loaded demo data 5 times today. Try again in about N hours." So one user's Clear demo → Load demo loop can't use up the app-wide demo cap for everyone. `deleteMyData` and `clearDemoData` don't reset it.
 3. **Fetch:**
    - **Gmail:** `google/gmail-inbox` with the caller's JWT through `tools.integration`, **`format: 'full'`** (the same call and price as `metadata`; bodies come inline as base64url), paged by `nextPageToken` (50 per page), **at most 100 messages per sync**.
      - Query (`buildGmailQuery`): the user-tested filter `-category:promotions -category:social ("thank you for applying" OR … OR "offer letter" OR "another candidate" OR "other candidates" OR "not be moving forward" OR "regret to inform" OR "after careful consideration" OR "position has been filled")`.
@@ -204,8 +236,8 @@ So sync runs inside the user's own request:
      - **A failed fetch is never an empty inbox.** Any `gmail-inbox` failure is returned as an error and claims no limit. A **402** (`insufficient_credits`; the api-worker checks credits *before* OAuth, so a zero-credit account gets this even when Gmail isn't connected) returns `code: 'gmail_credits'` with "Gmail sync needs DeepSpace credits on your account. Try demo data to see how applytrack works."
      - **Demo and real data never mix:** after a successful fetch, the action deletes the caller's `source: 'demo'` applications and emails (`deleteWhere({ userId, source: 'demo' })`, userId from the JWT only). A failed fetch (e.g. 402) keeps the demo data.
    - **Demo:** `DEMO_EMAILS` (12 emails, some with a `body`), dated relative to now.
-4. **Claim the slot, only if something new goes to the AI:** after step 5, if no new emails remain, the action returns `Synced 0 new and 0 updated` without any AI call and claims nothing (a clean Gmail fetch still advances `cursorAt`). Otherwise a Gmail sync writes `lastSyncAt = now`, a demo sync adds 1 to the user's `demoCount` (or starts a new window), and every sync adds 1 to today's app-wide `syncs`. Demo syncs never touch `lastSyncAt` or `cursorAt`. So an OAuth round trip, a failed fetch, or an empty sync blocks nothing.
-   - **Known race, accepted on purpose:** two requests in the same instant can both pass the check, because the records API has no compare-and-set. The cost is bounded: one extra sync of at most 100 messages, and step 5 makes repeats cheap.
+4. **Claim, only if something new goes to the AI:** after step 5, if no new emails remain, the action returns `Synced 0 new and 0 updated` without any AI call and claims nothing (a clean Gmail fetch still advances `cursorAt`). Otherwise it **atomically** claims the per-user ticket (Gmail: `gmail-user-<userId>-<10-minute bucket>`, limit 1; demo: `demo-user-<userId>-<day>`, limit 5), then the app-wide one (`sync-gmail-<day>` or `sync-demo-<day>`, 100 each). If the app-wide claim fails, the user ticket is released. A refused claim returns `rate_limited`, `demo_limited` or `app_limited`, with no AI call. A Gmail sync then writes `lastSyncAt = now`. Demo syncs never touch `lastSyncAt` or `cursorAt`. So an OAuth round trip, a failed fetch, or an empty sync uses nothing.
+   - **Parallel requests can't slip past the limits** (they could with the earlier counters; fixed 2026-11-21). With 20 parallel demo syncs against the real local RecordRoom, exactly the remaining slots got through.
 5. **Skip known messages:** page through this user's `emails` rows once, up front, and drop IDs already recorded (this runs before step 4's claim). The user's applications **from the same source only** (`{ userId, source }`) are loaded the same way, into memory, along with a normalized company → display name map. So a Gmail sync's classifier never sees demo company names, and real emails can never be matched onto demo cards.
 6. **Classify oldest first in batches of 10, one batch at a time**, using `claude-haiku-5-5` through `createDeepSpaceAI` and **no `authToken`**, so the app owner pays.
    - **One at a time on purpose:** every batch sees the companies and roles that earlier batches created, which matters most on a first sync. The cost is speed: about 40–60 s for 100 emails, with cards appearing live.
@@ -264,7 +296,7 @@ Bodies come in the same Gmail calls. Running batches one at a time changes the d
 
 `POST /api/actions/deleteMyData` deletes the caller's `emails` and `applications` with `deleteWhere({ userId })`, up to 500 per call, repeated until done. `userId` comes from the JWT only, and params are ignored. It returns `{ deleted: { emails, applications } }`.
 
-It **keeps `syncState.lastSyncAt`**, because deleting it would let a delete-then-Gmail-sync loop bypass the per-user rate limit on owner-billed AI. (A delete-then-demo loop is bounded by the app-wide daily sync cap.) It clears `cursorAt`, so the next Gmail sync is a full first sync once the 10-minute window passes.
+It **keeps `syncState.lastSyncAt`** and never touches `usageTickets`, so a delete-then-sync loop can't get around any limit. A delete-then-demo loop is bounded by the 5-per-day demo limit. It clears `cursorAt`, so the next Gmail sync is a full first sync once the 10-minute window passes.
 
 ### Clear demo data (`clearDemoData` action)
 
@@ -281,9 +313,18 @@ It **keeps `syncState.lastSyncAt`**, because deleting it would let a delete-then
   - the cursor not advancing after a failed batch;
   - the cursor query on later syncs;
   - delete touching only the caller's rows and keeping `lastSyncAt`;
-  - the app-wide cap: the 100th sync of the day passes and is counted; at 100, everyone is refused with `app_limited` and the right retry time, with no AI call, no rows, and the user's 10-minute slot untouched; a new UTC day starts at 1; a "connect Gmail first" result isn't counted;
+  - the app-wide caps, separate for demo and Gmail:
+    - the last demo slot passes; at the demo cap, demo is refused with `app_limited` ("Demo data has reached…") and the right retry time, with no AI call, no rows, and no user slot used;
+    - a full demo cap doesn't block Gmail;
+    - at the Gmail cap, Gmail is refused before the Gmail fetch;
+    - a new UTC day starts fresh, and a "connect Gmail first" result isn't counted;
+    - if the app-wide cap fills between the early check and the claim, the user slot is given back;
   - demo vs Gmail: back-to-back demo syncs aren't rate-limited and never write `lastSyncAt`; a demo sync with nothing new makes no AI call and counts nothing; an empty or failed Gmail sync claims nothing and doesn't block a demo or another Gmail sync; a 402 returns `gmail_credits` with the credits message, claims nothing, and keeps the demo data; after demo then Gmail no `source: 'demo'` rows remain (and another user's demo rows are untouched); the classifier's `existingApplications` for a Gmail sync never contains a demo company, even with the demo rows still in place;
-  - the per-user demo limit: 5 counted demo syncs pass, the 6th is refused with `demo_limited` and the right retry time, with no AI call and nothing counted app-wide; the window restarts 24 hours after it began; a nothing-new demo doesn't count; a Gmail sync isn't affected by the demo count;
+  - the per-user demo limit:
+    - 5 demo syncs per UTC day pass; the 6th is refused with `demo_limited` and the right retry time, with no AI call and nothing counted app-wide;
+    - **20 parallel demo syncs: exactly 5 pass, 15 are `demo_limited`;**
+    - a new UTC day starts fresh; a nothing-new demo doesn't count; Gmail isn't affected by the demo count;
+  - **10 parallel Gmail syncs from one user: exactly 1 passes, 9 are `rate_limited`;**
   - a demo sync is refused with `demo_unavailable` (no AI call, nothing counted) when the user has a Gmail application, or only a not-job-related Gmail email; another user's Gmail data doesn't block it.
 - `tests/sync-demo.spec.ts` runs real demo syncs as test accounts A and B, then checks:
   - all 12 labels, with 0 rejections, including demo-11 (take-home) as applied and demo-12 (rejection in paragraph 2) as rejected;
@@ -359,36 +400,50 @@ Reads go through the SDK's user executor as the verified caller, so `read: 'own'
   - A 2,000-character cap on the user's message.
   - **`contextBudget: 30_000`** characters of history (`ASSISTANT_CONTEXT_CONFIG`; the SDK default is 240,000). Older history gets summarized, which is one extra owner-billed call when it happens.
 - **Owner-billed:** `streamDeepSpaceAgent` and the compaction summarizer get no `authToken`, so they fall back to `APP_OWNER_JWT`. Reviewers with zero credits can chat (verified: 200, not 402).
-- **Limits:** `claimChatMessage` runs after the chat-ownership check and before any model call. It reads both counters, refuses with a plain-text **429** if either is full, and counts nothing on a refusal. Otherwise it increments both.
-  - **Per user:** 30 messages (`CHAT_DAILY_LIMIT`) in a 24-hour window that starts at the user's first message. Stored on the caller's `syncState` row, which users can read but not write.
-  - **App-wide:** 200 messages per UTC day across all accounts (`APP_DAILY_LIMIT`), on the closed `appUsage` row. It's a circuit breaker against many accounts. **To change it, edit the one constant `APP_DAILY_LIMIT` in `src/ai/chat-routes.ts`.**
+- **Limits:** `claimChatMessage` runs after the chat-ownership check and before any model call. It atomically claims a per-user ticket, then an app-wide one (see "Usage limits"), and refuses with a plain-text **429** if either is full. A user slot taken before an app-wide refusal is given back, so a refusal uses nothing.
+  - **Per user:** 30 messages (`CHAT_DAILY_LIMIT`) per UTC day (`assistant-user-<userId>-<day>`). This was a 24-hour window from the first message until 2026-11-21; a rolling window can't be claimed atomically.
+  - **App-wide:** 200 messages per UTC day across all accounts (`APP_DAILY_LIMIT`, `assistant-app-<day>`). It's a circuit breaker against many accounts. **To change either, edit the constant in `src/ai/chat-routes.ts`.**
   - The refusal says which limit was hit.
-  - Same accepted race as sync: requests in the same instant can slip a few messages past a cap.
+  - **Parallel requests can't slip past either cap** (unit test: 50 parallel messages from one user, exactly 30 get through).
+- **Chat titles** from `POST /api/ai/chats` and `PATCH /api/ai/chats/:id` are clipped to 100 characters (`clipTitle`). Titles are never sent to the model.
 - **History integrity:** the SDK replays stored `ai-messages` rows to the model, and a stored `role: "system"` row becomes a system prompt. So clients can't update `ai-messages` or `ai-chats` at all; only the chat routes write them (see Data model).
 - **Cost:** measured about $0.0005 per message on demo data, and about $0.0012 on a larger fictional dataset with the higher cap.
 
 ### Owner-billed AI: worst case per day
 
-Both owner-billed paths have an app-wide daily cap on a closed `appUsage` row. These are estimates from measured per-call costs and published Haiku 5.5 prices, not measurements (method in AGENT_LOG.md, 2026-11-19 and 2026-11-20).
+Since 2026-11-21 these are the **only** owner-billed paths a client can reach: the generic integration proxy, which billed the owner for any of 36 integrations with no cap, is gone. Each path has an app-wide daily cap made of atomic tickets, so parallel requests can't exceed it. These are estimates from measured per-call costs and published Haiku 5.5 prices, not measurements (method in AGENT_LOG.md, 2026-11-19 and 2026-11-20).
 
 | Path | Cap (per UTC day, all accounts) | Worst case per day |
 |---|---|---|
-| Sync classification | 100 syncs (`APP_SYNC_DAILY_LIMIT`) | All demo: 100 × $0.0012 ≈ **$0.12**. All 100-email Gmail syncs: 100 × ~$0.02 ≈ **$2.00** |
+| Gmail sync classification | 100 syncs (`APP_GMAIL_DAILY_LIMIT`) | 100 × ~$0.02 (a 100-email sync) ≈ **$2.00** |
+| Demo sync classification | 100 syncs (`APP_DEMO_DAILY_LIMIT`), separate from Gmail | 100 × $0.0012 ≈ **$0.12** |
 | Assistant | 200 messages (`APP_DAILY_LIMIT`) | ≈ **$3.00** at this app's tool sizes; ≈ **$5.00** at the SDK ceiling |
-| **App total** | | ≈ **$5.00** (Gmail syncs + real tool sizes); ≈ **$7.00** at the theoretical ceiling |
+| Integrations from the browser | none reachable | **$0** |
+| **App total** | | ≈ **$5.12**; ≈ **$7.12** at the theoretical ceiling |
+
+Gmail API calls (`gmail-inbox`, $0.013 each) are billed to each user, not the owner.
 
 **Tests.**
 - `src/ai/tools.test.ts`: exactly three tools; every executor call is `records.query`; email events never carry sender, subject or snippet; a proposal changes nothing; another user's id is not found; only the four statuses parse.
 - `src/ai/chat-routes.test.ts`:
-  - **Per user:** the 31st message is refused with the right retry time and doesn't count; the window resets after 24 hours; sync's fields survive.
-  - **App-wide:** the 201st message of a UTC day is refused for everyone without counting the user; the next UTC day starts a new row; the refusal text names the limit.
+  - **Per user:** the 31st message of a UTC day is refused until midnight UTC and doesn't count app-wide; **50 parallel messages: exactly 30 pass**; the next UTC day starts fresh, and users are counted separately.
+  - **App-wide:** the 201st message of a UTC day is refused for everyone, and the user slot is given back; **40 parallel messages from different users with 5 slots left: exactly 5 pass**, and every refused user's slot is released; the next UTC day starts fresh; the refusal text names the limit.
+  - Chat titles are clipped to 100 characters.
+- `src/server/usage-tickets.test.ts` (fake in `usage-tickets.fake.ts`, which models RecordRoom: each call yields so parallel claims interleave; a `uniqueOn` duplicate is refused in the same synchronous step as the insert; a create with an existing `recordId` upserts):
+  - **20 parallel claims against a limit of 5: exactly 5 succeed.**
+  - Separate scopes stay separate; a released slot can be claimed again; any create error other than a duplicate throws; the schema is unique on `(scope, n)` and closed.
+  - **Mutation-checked:** switching to deterministic record IDs (the upsert pitfall) makes all 20 "succeed" and fails 3 tests.
   - **Real SDK call with a fake `API_WORKER` binding:** the request to the model has `max_tokens: 2000`, `claude-haiku-5-5`, the owner's token in `X-Auth-Token`, and the scope rule in `system`. A mocked refusal reaches the user unchanged. A reply stopped at `max_tokens` reaches the client as "A p" plus "(reply shortened)". Also checks 4 tool calls and the 30,000-character budget.
   - `markShortened` adds the note only for a step that ended with `length` and leaves normal replies unchanged.
 - `assistant.model.test.ts` (repo root; **real model, owner-billed, skipped unless `RUN_MODEL_TESTS=1`**): the route's real settings and tools on fictional data (30 applications, 12 rejected). It checks that the reply lists all 12 rejected companies with finish reason `stop` and no shortened note, and that the heaviest follow-up question is answered in full. It reads the API worker credentials from the generated `.dev.vars` and never prints them.
 - `src/components/proposal-state.test.ts`: proposals are active, replaced, expired after 10 minutes, or expired when they have no timestamp; the newest proposal per application is picked across messages.
-- `src/schemas/permissions.test.ts`: `appUsage` is closed for `*`, viewer, member and admin.
+- `src/schemas/permissions.test.ts`: `usageTickets` is closed for `*`, viewer, member and admin, and `appUsage` is no longer registered.
 - `src/schemas/permissions.test.ts`: a member can't update another user's application, and only `status` is writable. For `ai-chats` and `ai-messages`, another member, an admin, a viewer and a signed-out user can't read Alice's rows, and another member or admin can't update or delete them. **Alice herself can't update them** (no role, including a `role: "system"` message or a compacted chat), but can delete them. These assert on `canUpdate`, the gate RecordRoom checks; `checkFieldPermissions` only applies `writableFields` and returns null when there are none.
 - `tests/sync-demo.spec.ts`: `GET /_deepspace/agent/browser/tools` and MCP `tools/list` return exactly the three names, and `records_update` is a 404.
+- `tests/sync-demo.spec.ts` (**closed routes**, signed in):
+  - 404 for `openai`, `email` and `google/gmail-inbox` through `/api/integrations/:name/:endpoint`, for the catalog, for disconnect, and for `/api/files/*`;
+  - `/api/integrations/status` still returns 200 with `gmailRead`;
+  - the board opens only `/ws/<scope>` app sockets.
 - `tests/board.spec.ts`: with the model mocked by `page.route` on `/api/ai/chat`:
   - Stale proposals: of three cards, the older Kestrel card shows "Replaced…" with no Confirm, the newer one can confirm, and an 11-minute-old Maple Ridge card shows "Expired…".
   - A proposal card appears and Kestrel stays in Applied; Cancel changes nothing; Confirm moves it to Interview, and that survives a reload.

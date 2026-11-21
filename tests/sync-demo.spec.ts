@@ -158,6 +158,54 @@ test('Gmail sync without credits: the credits message, not an empty inbox; demo 
   expect((await apps(b.page)).length).toBe(before)
 })
 
+// Whole-app security review (2026-11-21): the scaffold's generic integration
+// proxy billed the owner for every unlisted integration. Only the caller's own
+// connection status stays; Gmail is read by the sync action server-side (the
+// credits test above reaches the real gmail-inbox through the action).
+test('closed routes: integrations proxy, files, unused rooms; status still works', async ({ users }) => {
+  const [a] = await users(['Reviewer'])
+  const sockets: string[] = []
+  a.page.on('websocket', (ws) => sockets.push(new URL(ws.url()).pathname))
+  await a.page.goto('/board')
+  await expect(a.page.getByTestId('first-run').or(a.page.getByTestId('application-card').first())).toBeVisible({ timeout: 30_000 })
+
+  const call = (method: string, path: string, body?: unknown) =>
+    a.page.evaluate(
+      async ({ method, path, body }) => {
+        const { token } = await (await fetch('/api/auth/token', { method: 'POST', credentials: 'include' })).json()
+        const r = await fetch(path, {
+          method,
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })
+        return { status: r.status, text: (await r.text()).slice(0, 200) }
+      },
+      { method, path, body },
+    )
+
+  // Signed in, an owner-billed (unlisted) integration is gone.
+  expect((await call('POST', '/api/integrations/openai/chat', { messages: [] })).status).toBe(404)
+  expect((await call('POST', '/api/integrations/email/send', {})).status).toBe(404)
+  // Gmail via this route too (it's read by the sync action instead).
+  expect((await call('POST', '/api/integrations/google/gmail-inbox', {})).status).toBe(404)
+  // The catalog and disconnect routes, and the files proxy.
+  expect((await call('GET', '/api/integrations')).status).toBe(404)
+  expect((await call('DELETE', '/api/integrations/oauth/google/disconnect')).status).toBe(404)
+  expect((await call('GET', '/api/files/anything')).status).toBe(404)
+  expect((await call('POST', '/api/files/upload', {})).status).toBe(404)
+  // The caller's own connection status still works (the board needs it).
+  const status = await call('GET', '/api/integrations/status')
+  expect(status.status).toBe(200)
+  expect(status.text).toContain('gmailRead')
+
+  // The board opens only the records socket, never the removed rooms. (Vite's
+  // own HMR socket at "/" is a dev-server artifact; only /ws/* is the app's.)
+  await a.page.waitForTimeout(1000)
+  const appSockets = sockets.filter((p) => p.startsWith('/ws/'))
+  expect(appSockets.length).toBeGreaterThan(0)
+  for (const path of appSockets) expect(path).toMatch(/^\/ws\/[^/]+$/)
+})
+
 test('agent tool surface: only the three assistant tools, over HTTP and MCP', async ({ users }) => {
   const [a] = await users(['Reviewer'])
   await a.page.goto('/home')

@@ -17,10 +17,11 @@ export const syncStateSchema: CollectionSchema = {
     { name: 'lastSyncAt', storage: 'text', interpretation: { kind: 'datetime' } },
     // Gmail cursor: advanced only after a sync with no failed batches.
     { name: 'cursorAt', storage: 'text', interpretation: { kind: 'datetime' } },
-    // Assistant message limit (owner-billed AI), written by /api/ai/chat.
+    // No longer written (2026-11-21): the assistant and demo limits moved to
+    // atomic tickets (src/server/usage-tickets.ts). Kept so rows already
+    // stored in production still match the table.
     { name: 'chatWindowStart', storage: 'text', interpretation: { kind: 'datetime' } },
     { name: 'chatCount', storage: 'number', interpretation: 'plain' },
-    // Demo sync limit (owner-billed AI): 24 hours from the first counted demo sync.
     { name: 'demoWindowStart', storage: 'text', interpretation: { kind: 'datetime' } },
     { name: 'demoCount', storage: 'number', interpretation: 'plain' },
   ],
