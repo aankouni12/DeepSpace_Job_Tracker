@@ -54,8 +54,11 @@ export default function BoardPage() {
 
   if (apps.status === 'loading') return <div aria-busy="true" className="min-h-full" />
 
+  const hasGmailData =
+    apps.records.some((r) => r.data.source === 'gmail') || emails.records.some((r) => r.data.source === 'gmail')
+
   if (apps.records.length === 0 && !sync.running) {
-    return <FirstRun sync={sync} />
+    return <FirstRun sync={sync} hasGmailData={hasGmailData} />
   }
 
   const changeStatus = (recordId: string, status: Status) =>
@@ -71,7 +74,12 @@ export default function BoardPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
-          <SyncControls sync={sync} lastSyncAt={state?.lastSyncAt} />
+          <SyncControls
+            sync={sync}
+            lastSyncAt={state?.lastSyncAt}
+            hasGmailData={hasGmailData}
+            hasDemoData={apps.records.some((r) => r.data.source === 'demo')}
+          />
           <Button variant="outline" onClick={() => setAssistantOpen((o) => !o)} aria-expanded={assistantOpen}>
             {assistantOpen ? 'Close assistant' : 'Ask the assistant'}
           </Button>
@@ -140,7 +148,7 @@ export default function BoardPage() {
   )
 }
 
-function FirstRun({ sync }: { sync: ReturnType<typeof useSync> }) {
+function FirstRun({ sync, hasGmailData }: { sync: ReturnType<typeof useSync>; hasGmailData: boolean }) {
   return (
     <div className="mx-auto grid min-h-full max-w-5xl items-center gap-12 px-6 py-16 md:grid-cols-[1.1fr_1fr]">
       <div data-testid="first-run">
@@ -152,9 +160,11 @@ function FirstRun({ sync }: { sync: ReturnType<typeof useSync> }) {
           Applied, Interview, Offer or Rejected, so you can see where everything stands.
         </p>
         <div className="mt-8 flex flex-wrap gap-3">
-          <Button size="lg" onClick={() => sync.run('demo')} disabled={sync.running !== null}>
-            Try with demo data
-          </Button>
+          {!hasGmailData && (
+            <Button size="lg" onClick={() => sync.run('demo')} disabled={sync.running !== null}>
+              Try with demo data
+            </Button>
+          )}
           <Button size="lg" variant="outline" onClick={() => sync.run('gmail')} disabled={sync.running !== null}>
             Connect Gmail
           </Button>

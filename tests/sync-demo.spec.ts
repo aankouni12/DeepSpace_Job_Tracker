@@ -3,8 +3,10 @@
  * Records are read through the agent tools as the signed-in user, so the
  * collections' permissions apply exactly as they do for the app.
  *
- * Re-runnable: local state can persist between runs, so a first call may be
- * rate_limited; assertions are on the resulting records.
+ * Re-runnable: local state can persist between runs (B keeps its demo data),
+ * so assertions are on the resulting records. Demo syncs are exempt from the
+ * per-user 10-minute limit (reviewer fix, 2026-11-20); only the app-wide daily
+ * cap applies, and only when something new goes to the AI.
  */
 import { test, expect, loadAllTestAccounts } from 'deepspace/testing'
 import type { Page } from '@playwright/test'
@@ -89,52 +91,66 @@ async function expectDemoData(page: Page): Promise<string[]> {
   return mine.map((a) => a.id).sort()
 }
 
-test('demo sync: labels, injection, rate limit, isolation, delete', async ({ users }) => {
+test('demo sync: labels, injection, repeat, isolation, delete', async ({ users }) => {
   test.setTimeout(180_000)
   const [a, b] = await users(['Reviewer', 'Reviewer Two'])
   await Promise.all([a.page.goto('/home'), b.page.goto('/home')])
 
+  // A starts empty (this spec deletes A's data at the end of every run).
   const first = await post(a.page, '/api/actions/sync', { source: 'demo' })
   console.log('SYNC_1 ' + JSON.stringify(first.json))
   expect(first.status).toBe(200)
-  test.skip(
-    !first.json.success && (await emailEvents(a.page)).length === 0,
-    'A deleted its data in a run less than 10 minutes ago and is still rate-limited; ' +
-      'wait, or rm -rf .wrangler/state for a fresh local run.',
-  )
-  if (first.json.success) {
-    const d = first.json.data
+  expect(first.json.success).toBe(true)
+  const d = first.json.data
+  if (d.classified > 0) {
     expect(d.failedBatches).toBe(0)
-    // Diagnostics: short ids map back cleanly; the model labeled all 10.
+    // Diagnostics: short ids map back cleanly; the model labeled all 12.
     expect(d.rejected).toEqual({ unknownId: 0, badLabel: 0, noCompany: 0, notGrounded: 0 })
     expect(Object.values(d.modelLabels as Record<string, number>).reduce((x, y) => x + y, 0)).toBe(12)
-  } else {
-    expect(first.json.code).toBe('rate_limited')
   }
 
   const aIds = await expectDemoData(a.page)
 
-  // Rate limit: an immediate second sync is refused.
+  // An immediate second demo sync is not rate-limited; with nothing new it
+  // sends nothing to the AI and changes nothing.
   const second = await post(a.page, '/api/actions/sync', { source: 'demo' })
-  expect(second.json).toMatchObject({ success: false, code: 'rate_limited' })
+  expect(second.json).toMatchObject({ success: true, data: { classified: 0, applicationsCreated: 0 } })
+  expect(await expectDemoData(a.page)).toEqual(aIds)
 
   // B syncs its own demo data; each sees only their own rows.
   const bSync = await post(b.page, '/api/actions/sync', { source: 'demo' })
-  expect(bSync.json.success || bSync.json.code === 'rate_limited').toBe(true)
+  expect(bSync.json.success).toBe(true)
   const bIds = await expectDemoData(b.page)
   expect(aIds.filter((id) => bIds.includes(id))).toEqual([])
 
-  // A deletes its data: only A's emails and applications go; the rate-limit
-  // timestamp stays, so A cannot delete-and-resync to burn owner AI credits.
+  // A deletes its data: only A's emails and applications go. (A delete-and-
+  // resync demo loop is bounded by the app-wide daily sync cap, unit-tested
+  // in src/actions/sync.test.ts.)
   const del = await post(a.page, '/api/actions/deleteMyData', { userId: 'someone-else' }) // param is ignored
   expect(del.json).toEqual({ success: true, data: { deleted: { emails: 12, applications: 5 } } })
   expect(await emailEvents(a.page)).toEqual([])
   expect(await apps(a.page)).toEqual([])
-  const afterDelete = await post(a.page, '/api/actions/sync', { source: 'demo' })
-  expect(afterDelete.json).toMatchObject({ success: false, code: 'rate_limited' })
 
   // B is untouched.
   expect(await expectDemoData(b.page)).toEqual(bIds)
+})
+
+// Reviewer Two is a zero-credit account: the real api-worker answers
+// gmail-inbox with 402 insufficient_credits (before any OAuth check).
+test('Gmail sync without credits: the credits message, not an empty inbox; demo data kept', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [b] = await users(['Reviewer Two'])
+  await b.page.goto('/board')
+  await expect(b.page.getByTestId('application-card').first()).toBeVisible({ timeout: 30_000 }) // demo from the test above
+  const before = (await apps(b.page)).length
+  await b.page.getByRole('button', { name: /^(Connect|Sync) Gmail$/ }).click()
+  const status = b.page.getByTestId('sync-status')
+  await expect(status).toHaveText(
+    'Gmail sync needs DeepSpace credits on your account. Try demo data to see how applytrack works.',
+    { timeout: 30_000 },
+  )
+  await expect(status).not.toContainText('Synced')
+  expect((await apps(b.page)).length).toBe(before)
 })
 
 test('agent tool surface: only the three assistant tools, over HTTP and MCP', async ({ users }) => {

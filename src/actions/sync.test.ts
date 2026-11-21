@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ActionTools } from 'deepspace/worker'
 import type { Env } from '../../worker'
 import {
+  APP_SYNC_DAILY_LIMIT,
   buildGmailQuery,
   classifyAndWrite,
+  clearDemoData,
   cleanRole,
   deleteMyData,
   emptyStats,
@@ -300,6 +302,7 @@ function fakeTools(gmailPages: unknown[] = []) {
     emails: new Map(),
     applications: new Map(),
     syncState: new Map(),
+    appUsage: new Map(),
   }
   const gmailCalls: Array<Record<string, unknown>> = []
   let n = 0
@@ -333,7 +336,9 @@ function fakeTools(gmailPages: unknown[] = []) {
     },
     integration: async (_endpoint: string, body: Record<string, unknown>) => {
       gmailCalls.push(body)
-      return { success: true, data: gmailPages.shift() ?? { messages: [], resultSizeEstimate: 0 } }
+      const page = gmailPages.shift() as { __result?: unknown } | undefined
+      if (page?.__result) return page.__result // a whole ActionResult, e.g. a failure
+      return { success: true, data: page ?? { messages: [], resultSizeEstimate: 0 } }
     },
   }
   return { db, gmailCalls, tools: tools as unknown as ActionTools }
@@ -442,6 +447,194 @@ describe('sync action (Gmail, fake tools)', () => {
     })
     await run(sync, tools, 'alice', { source: 'gmail' })
     expect(gmailCalls[0].q).toBe(buildGmailQuery(cursorAt))
+  })
+})
+
+describe('sync action: app-wide daily cap (fake tools)', () => {
+  const T = Date.UTC(2026, 10, 20, 15) // 15:00 UTC, 9 hours before the next UTC day
+  beforeEach(() => {
+    generateObject.mockReset()
+    vi.useFakeTimers({ now: T, toFake: ['Date'] })
+    return () => {
+      vi.useRealTimers()
+    }
+  })
+
+  it(`counts each sync; the last of ${APP_SYNC_DAILY_LIMIT} passes`, async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    db.appUsage.set('sync-2026-11-20', { recordId: 'sync-2026-11-20', data: { day: '2026-11-20', syncs: APP_SYNC_DAILY_LIMIT - 1 } })
+    const res = await run(sync, tools, 'alice', { source: 'demo' })
+    expect(res.success).toBe(true)
+    expect(db.appUsage.get('sync-2026-11-20')?.data.syncs).toBe(APP_SYNC_DAILY_LIMIT)
+    expect(generateObject).toHaveBeenCalled()
+  })
+
+  it('refuses everyone at the cap before any AI call, without using up the user slot', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    db.appUsage.set('sync-2026-11-20', { recordId: 'sync-2026-11-20', data: { day: '2026-11-20', syncs: APP_SYNC_DAILY_LIMIT } })
+    const res = await run(sync, tools, 'alice', { source: 'demo' })
+    expect(res).toMatchObject({
+      success: false,
+      code: 'app_limited',
+      error: "Sync has reached today's limit for everyone. Try again in about 9 hours.",
+      details: { retryAfterSeconds: 9 * 3600 },
+    })
+    expect(generateObject).not.toHaveBeenCalled()
+    expect(db.applications.size + db.emails.size).toBe(0)
+    expect(db.syncState.has('alice')).toBe(false)
+    expect(db.appUsage.get('sync-2026-11-20')?.data.syncs).toBe(APP_SYNC_DAILY_LIMIT)
+  })
+
+  it('starts a fresh count on the next UTC day', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    db.appUsage.set('sync-2026-11-19', { recordId: 'sync-2026-11-19', data: { day: '2026-11-19', syncs: APP_SYNC_DAILY_LIMIT } })
+    const res = await run(sync, tools, 'alice', { source: 'demo' })
+    expect(res.success).toBe(true)
+    expect(db.appUsage.get('sync-2026-11-20')?.data).toEqual({ day: '2026-11-20', syncs: 1 })
+  })
+
+  it('does not count a Gmail sync that stops at "connect Gmail first"', async () => {
+    const { db, tools } = fakeTools([{ requiresOAuth: true, authUrl: 'https://consent.example' }])
+    const res = await run(sync, tools, 'alice', { source: 'gmail' })
+    expect(res).toMatchObject({ success: true, data: { requiresOAuth: true } })
+    expect(db.appUsage.size).toBe(0)
+    expect(generateObject).not.toHaveBeenCalled()
+  })
+})
+
+describe('sync action: demo vs Gmail (fake tools)', () => {
+  beforeEach(() => {
+    generateObject.mockReset()
+  })
+  // The 402 the api-worker returns for a zero-credit account (seen locally,
+  // 2026-11-20), after normalizeApiError.
+  const credits402 = {
+    __result: {
+      success: false,
+      error: 'Insufficient credits.',
+      code: 'insufficient_credits',
+      status: 402,
+      details: { availableCredits: 0, requiredCredits: 1.3 },
+    },
+  }
+  const demoCompanies = (db: ReturnType<typeof fakeTools>['db']) =>
+    [...db.applications.values()].filter((r) => r.data.source === 'demo').map((r) => String(r.data.company))
+  const promptCompanies = (call: unknown[]) =>
+    (JSON.parse((call[0] as { prompt: string }).prompt).existingApplications as Array<{ company: string }>).map(
+      (a) => a.company,
+    )
+
+  it('a demo sync right after another demo sync is not rate-limited, and never touches lastSyncAt', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    const ctx = { userId: 'alice', params: {}, tools, env: {} as Env, callerJwt: 'jwt' }
+    expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
+    expect(db.applications.size).toBeGreaterThan(0)
+    await clearDemoData(ctx)
+    expect(db.applications.size + db.emails.size).toBe(0)
+    const again = await run(sync, tools, 'alice', { source: 'demo' })
+    expect(again.success).toBe(true)
+    expect(db.applications.size).toBeGreaterThan(0)
+    expect(db.syncState.get('alice')?.data.lastSyncAt).toBeUndefined()
+    expect([...db.appUsage.values()][0].data.syncs).toBe(2) // both still count app-wide
+  })
+
+  it('a demo sync with nothing new costs no AI and counts nothing', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    await run(sync, tools, 'alice', { source: 'demo' })
+    const calls = generateObject.mock.calls.length
+    const res = await run(sync, tools, 'alice', { source: 'demo' })
+    expect(res).toMatchObject({ success: true, data: { classified: 0, applicationsCreated: 0 } })
+    expect(generateObject.mock.calls.length).toBe(calls)
+    expect([...db.appUsage.values()][0].data.syncs).toBe(1)
+  })
+
+  it('an empty Gmail sync claims nothing and does not block a demo or another Gmail sync', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools([{ messages: [], resultSizeEstimate: 0 }, { messages: [] }])
+    const empty = await run(sync, tools, 'alice', { source: 'gmail' })
+    expect(empty).toMatchObject({ success: true, data: { fetched: 0, applicationsCreated: 0 } })
+    expect(db.syncState.get('alice')?.data.lastSyncAt).toBeUndefined()
+    expect(db.syncState.get('alice')?.data.cursorAt).toBeTruthy() // the fetch was clean
+    expect(db.appUsage.size).toBe(0)
+    expect((await run(sync, tools, 'alice', { source: 'gmail' })).success).toBe(true)
+    expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
+  })
+
+  it('a failed Gmail fetch is an error, not an empty inbox, and does not block a demo sync', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools([{ __result: { success: false, error: 'Upstream error', status: 502 } }])
+    const res = await run(sync, tools, 'alice', { source: 'gmail' })
+    expect(res).toMatchObject({ success: false, error: 'Upstream error' })
+    expect(db.syncState.has('alice')).toBe(false)
+    expect(db.appUsage.size).toBe(0)
+    expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
+  })
+
+  it('a 402 from gmail-inbox returns the credits message and claims nothing', async () => {
+    const { db, tools } = fakeTools([credits402])
+    const res = await run(sync, tools, 'alice', { source: 'gmail' })
+    expect(res).toEqual({
+      success: false,
+      code: 'gmail_credits',
+      error: 'Gmail sync needs DeepSpace credits on your account. Try demo data to see how applytrack works.',
+    })
+    expect(db.syncState.has('alice')).toBe(false)
+    expect(db.appUsage.size).toBe(0)
+    expect(generateObject).not.toHaveBeenCalled()
+  })
+
+  it('a 402 keeps the demo data; a successful Gmail sync removes it', async () => {
+    modelLabelsAllApplied()
+    const t = Date.UTC(2026, 10, 10)
+    const { db, tools } = fakeTools([credits402, { messages: [gmailMessage('g1', 'Acme', t)] }])
+    await run(sync, tools, 'alice', { source: 'demo' })
+    const demoRows = db.applications.size
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    expect(db.applications.size).toBe(demoRows)
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    const rows = [...db.applications.values(), ...db.emails.values()]
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every((r) => r.data.source === 'gmail')).toBe(true)
+  })
+
+  it("after demo then Gmail, no source:'demo' rows remain, and only the caller's were deleted", async () => {
+    modelLabelsAllApplied()
+    const t = Date.UTC(2026, 10, 10)
+    const { db, tools } = fakeTools([{ messages: [gmailMessage('g1', 'Acme', t)] }])
+    await run(sync, tools, 'bob', { source: 'demo' })
+    await run(sync, tools, 'alice', { source: 'demo' })
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    const alice = [...db.applications.values(), ...db.emails.values()].filter((r) => r.data.userId === 'alice')
+    expect(alice.some((r) => r.data.source === 'demo')).toBe(false)
+    expect(alice.some((r) => r.data.source === 'gmail')).toBe(true)
+    expect([...db.applications.values()].some((r) => r.data.userId === 'bob' && r.data.source === 'demo')).toBe(true)
+  })
+
+  it('never passes demo company names to the classifier for a Gmail sync', async () => {
+    modelLabelsAllApplied()
+    const t = Date.UTC(2026, 10, 10)
+    // Two Gmail batches, so the second call carries existing applications.
+    const messages = Array.from({ length: 12 }, (_, i) => gmailMessage(`g${i}`, i < 6 ? 'Acme' : 'Bluefin', t + i))
+    const { db, tools } = fakeTools([{ messages }])
+    // Keep demo rows in place for this test, so the source filter itself is what's checked.
+    const realDeleteWhere = tools.deleteWhere
+    tools.deleteWhere = (async () => ({ success: true, data: { deleted: 0 } })) as typeof tools.deleteWhere
+    await run(sync, tools, 'alice', { source: 'demo' })
+    const names = demoCompanies(db)
+    expect(names.length).toBeGreaterThan(0)
+    const before = generateObject.mock.calls.length
+    await run(sync, tools, 'alice', { source: 'gmail' })
+    const gmailCalls = generateObject.mock.calls.slice(before)
+    expect(gmailCalls.length).toBe(2)
+    const seen = gmailCalls.flatMap(promptCompanies)
+    expect(seen).toContain('Acme')
+    for (const n of names) expect(seen).not.toContain(n)
+    tools.deleteWhere = realDeleteWhere
   })
 })
 

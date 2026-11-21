@@ -8,11 +8,11 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 **All features are done.** Live at https://applytrack.app.space, deployed from `main` @ `6fa40c0` (= `origin/main`):
 - Platform sign-in; read-only Gmail connection (`gmailRead` only).
-- **Data model** with per-user permissions: `applications`, `emails`, `syncState`, plus `appUsage`, which is closed to every role. The `ai-chats` and `ai-messages` collections are own-rows-only, admin included.
+- **Data model** with per-user permissions: `applications`, `emails`, `syncState`, plus `appUsage`, which is closed to every role. The `ai-chats` and `ai-messages` collections are own-rows-only, admin included, and (on `fix/security-review`) no client can update them.
 - **`sync` server action** (Gmail and demo):
   - user-tuned Gmail query, paging and cursor, up to 100 emails;
   - classification from the email body, company/role merging, and status that only moves forward;
-  - 10-minute rate limit; owner-billed AI.
+  - 10-minute rate limit per user, plus (on `fix/security-review`) 100 syncs per UTC day app-wide; owner-billed AI.
 - **`deleteMyData`**, with a button in Settings.
 - **Pipeline board:** first-run screen, live lanes, status dropdown, email timeline, Sync / Connect / Load demo, and sync on open after 24 hours.
 - **AI assistant** (board panel):
@@ -22,7 +22,8 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
   - owner-billed Haiku 5.5 with 2,000 output tokens, 4 tool calls and 30,000 characters of history;
   - 30 messages per user per day and 200 per day app-wide;
   - "(reply shortened)" when a reply still hits the cap.
-- **Tests:** 97 unit, plus 2 real-model tests (`RUN_MODEL_TESTS=1`); 14 Playwright; 1 post-deploy live check (`tests/assistant.live.ts`).
+- **Demo vs Gmail** (on `fix/security-review`): demo isn't rate-limited per user; limits are claimed only when something new goes to the AI; a Gmail sync replaces demo rows; a 402 shows the credits message; Demo data label and Clear demo data on the board.
+- **Tests:** 113 unit, plus 2 real-model tests (`RUN_MODEL_TESTS=1`); 14 Playwright; 1 post-deploy live check (`tests/assistant.live.ts`).
 - **Workflow:** the agent commits and merges locally, and the user pushes. Deploy only when `main` = `origin/main`, from PowerShell at `C:\`, then run the live check.
 
 **Friday 2026-11-20 (polish, test, write):**
@@ -41,14 +42,20 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - Outbound calls per request: a 100-email sync is about 175 calls and took about 76 s. Both work, but the platform limits aren't documented, so the cap stays at 100.
 - A first sync reaches only the newest 100 matching emails, about a month here. More than 100 new matches between syncs means the oldest are missed.
 - Rate-limit race: two requests in the same instant can both pass (accepted on purpose; bounded cost).
+- **One user can use up the app-wide sync cap:** with demo exempt from the per-user limit, a Clear demo → Load demo loop sends 12 emails to the AI each time. 100 loops (about $0.12) would block every user's syncs, Gmail included, until the next UTC day. Open question for the user.
+- **Zero-credit accounts can't connect Gmail:** the api-worker checks credits before OAuth, so "Connect Gmail" returns 402 and never reaches Google's consent screen. The credits message now says so plainly.
 - An email that never names its company is recorded as `not_job_related` and not retried.
 - Card count is 37 against the user's expected 29–35; there may still be some role splits (not checked by name).
 - Interview definition: AI-agent screenings count as Applied (Stellantis). That's a one-line prompt change if the user wants otherwise.
-- Owner AI cost: about $0.0012 per demo sync, and an estimated $0.015–0.02 per 100-email Gmail sync. Limited by the rate limit only, not per account.
-- **Assistant cost:**
-  - Measured: about $0.0005–0.0012 per message.
-  - Worst case (an estimate): about $3.00 a day app-wide at this app's data sizes, about $5.00 at the theoretical ceiling, bounded by the 200-a-day cap.
-  - Haiku's hidden thinking counts against the 2,000-token cap and can't be turned off through the platform.
+- **Owner AI cost, worst case per day** (estimates; both paths have an app-wide daily cap since `fix/security-review`):
+
+  | Path | Cap (per UTC day, all accounts) | Worst case per day |
+  |---|---|---|
+  | Sync classification ($0.0012 per demo sync, ~$0.015–0.02 per 100-email Gmail sync) | 100 syncs | ≈ $0.12 all demo; ≈ **$2.00** all Gmail |
+  | Assistant ($0.0005–0.0012 per message measured) | 200 messages | ≈ **$3.00** at this app's data sizes; ≈ $5.00 at the theoretical ceiling |
+  | **App total** | | ≈ **$5.00**; ≈ $7.00 at the theoretical ceiling |
+
+  Haiku's hidden thinking counts against the assistant's 2,000-token cap and can't be turned off through the platform.
 - **Stale proposals and the Confirm write are enforced only in the browser.** The schema still limits writes to `status` on the user's own rows.
 - **The assistant sees company and role names,** which sync's AI extracted from emails. That leaves a small channel for prompt injection. The worst it can do is cause a proposal the user can cancel.
 
@@ -766,3 +773,91 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 - `tsc` clean; vitest 97/97 (2 real-model tests skipped by default); Playwright **15/15** (14 plus the new one).
 - `vite build`: the prerendered `dist/client/index.html` has the new title, description, and copy, and no Google Fonts references; the three `.woff2` files are in `dist/client/fonts/`.
 - Screenshots of the built static page at 1280 and 390 px wide: Plex renders, the cards stack on the phone, and there's no horizontal scroll.
+
+**Shipped:** `/security-review` found nothing. Merged; the user pushed `main`.
+
+---
+
+## 2026-11-20: Security fixes found by an external security review, plus reviewer-test fixes (branch `fix/security-review`)
+
+### Part 1: found by an external security review
+
+**1. MEDIUM: users could rewrite their own assistant history.** `ai-messages` and `ai-chats` had the SDK's `update: 'own'` with no `writableFields`. The reviewer confirmed in the SDK that `turnsToCoreMessages` turns a stored `role: "system"` message into a system prompt, so a user could bypass the assistant's scope rule. A user could also inflate stored `content` or edit `compactedSummary`/`compactedThroughId`, getting around the 2,000-character message cap and forcing large summarizer calls on every turn, which breaks the cost model.
+- **Fix** (`src/schemas/ai-chat-schema.ts`): `update: false` for member and admin on both collections; delete own stays. The agent chose `update: false` over `writableFields: ['title']` for chats because the UI never writes chats directly: renaming goes through `PATCH /api/ai/chats/:id`, which accepts only `title`.
+- **The chat routes still work:** the SDK's chat-history helpers (`getChat`, `createChat`, `updateChat`, `appendMessage`, `loadMessages`, `deleteChatCascade`) all go through `executeToolAsApp` with `X-App-Action: true`, which is RBAC off (`dist/worker.js` ~9195).
+- **Tests** (`permissions.test.ts`): the owner can't update either collection (member, admin, viewer, signed out), including a `role: "system"` message and a compacted chat, but can delete.
+  - **Agent mistake, caught by the tests:** the first version also asserted `checkFieldPermissions(...)` is non-null for `role`/`content`/`compactedSummary`. It failed, because `checkFieldPermissions` only applies `writableFields` and returns null when there are none (`worker.js:687`). `canUpdate` is the real gate: RecordRoom checks it for record updates (`worker.js:1592`) and Yjs text writes (1982, 2078). The tests now assert on `canUpdate`.
+
+**2. LOW: no app-wide cap on sync.** Demo sync is owner-billed and repeatable across many accounts.
+- **Fix:** `APP_SYNC_DAILY_LIMIT = 100` syncs per UTC day across all accounts, on the closed `appUsage` row `sync-YYYY-MM-DD` (new `syncs` column), in the same pattern as the assistant's cap. It's checked before any Gmail fetch or AI call. At the cap: `code: 'app_limited'`, "Sync has reached today's limit for everyone. Try again in about N hours." `SyncControls` already shows `error` for unknown codes.
+- **User's change on approval:** the agent proposed 300; **the user set 100** (an evaluation app with a few users), which keeps the app's total worst case around $5 a day.
+- **Tests:** the 100th passes and counts; at 100, refused with no AI call, no rows, and the user's slot untouched; the next UTC day starts at 1; a "connect Gmail first" result isn't counted.
+
+**3. LOW: scaffold debug page.** Deleted `src/pages/(app)/(protected)/api-status.tsx`, its two Playwright tests in `tests/collab.spec.ts` (the two-user sign-in test stays), and the pointer comment in `src/nav.ts`. The generated `src/router.ts` dropped `/api-status` on the next dev run.
+
+**Worst-case owner AI cost per day (estimates):**
+
+| Path | Cap | Worst case |
+|---|---|---|
+| Sync | 100 syncs | ≈ $0.12 all demo; ≈ $2.00 all 100-email Gmail syncs |
+| Assistant | 200 messages | ≈ $3.00 at real tool sizes; ≈ $5.00 at the SDK ceiling |
+| **App total** | | ≈ **$5.00**; ≈ $7.00 at the theoretical ceiling |
+
+### Part 2: reviewer-test fixes (found by the user on a fresh account)
+
+**Asked** (the user stepped away and left the spec; it counted as the approval):
+1. **Demo isn't limited per user;** limits are claimed only when at least one new email goes to the AI; a `gmail-inbox` failure (e.g. 402) is never an empty inbox and shows a credits message. "Check whether 402 is currently hidden."
+2. **Demo and Gmail data stay completely separate:**
+   - a Gmail sync first deletes the caller's demo rows;
+   - "Load demo data" is hidden once there's Gmail data;
+   - a "Demo data" label and "Clear demo data" button;
+   - the classifier only sees Gmail-source companies;
+   - demo never touches the cursor or `lastSyncAt`.
+3. "Synced 0 new and 0 updated" for an empty Gmail sync stays.
+
+**Answer on 402: it was not being hidden.** The agent checked the code path and then reproduced it on the local server as the zero-credit test account Reviewer Two:
+- The real api-worker answered `{"success":false,"error":"Insufficient credits.","code":"insufficient_credits","status":402,"details":{"availableCredits":0,"requiredCredits":1.3}}`.
+- The board showed "Insufficient credits.", not "0 found", and no limit was claimed.
+- **New finding:** the credit check comes **before** OAuth, so on a zero-credit account "Connect Gmail" never reaches Google's consent screen.
+
+**Built:**
+- **`src/actions/sync.ts`:**
+  - The per-user 10-minute check applies to Gmail only.
+  - `claim(source)` runs only after known IDs are skipped and at least one new email remains. Gmail writes `lastSyncAt` and counts; demo only counts.
+  - A sync with nothing new returns zeros without any AI call. A clean Gmail fetch still advances `cursorAt`.
+  - A 402 / `insufficient_credits` returns `code: 'gmail_credits'` with the user's wording; other failures pass through as errors.
+  - After a successful Gmail fetch, `deleteRows(tools, { userId, source: 'demo' })` runs; a failed fetch keeps the demo.
+  - Applications for the classifier's existing list are loaded with `{ userId, source }`.
+  - The new `clearDemoData` action and the shared `deleteRows` helper, which `deleteMyData` now uses too.
+- **`src/actions/index.ts`:** registers `clearDemoData`.
+- **`SyncControls.tsx`:** a `clearDemo` callback.
+  - While demo rows are shown: a **Demo data** label and **Clear demo data** button instead of **Load demo data**.
+  - With any Gmail rows: **Load demo data** is hidden.
+- **`board.tsx`:** computes `hasGmailData` (Gmail applications *or* Gmail email rows, so an inbox with only not-job mail counts) and `hasDemoData`. It also hides the first-run **Try with demo data** when there's Gmail data.
+- **`ApplicationCard.tsx`:** an optional `source` on the `Application` and `EmailRow` types.
+
+**Tests:**
+- **Unit** (`sync.test.ts`, 8 new; the fake Gmail tool can now return a whole failed result):
+  - back-to-back demo isn't rate-limited and never writes `lastSyncAt`;
+  - a repeat demo with nothing new makes no AI call and counts nothing;
+  - an empty Gmail sync claims nothing and blocks neither demo nor Gmail;
+  - a failed fetch is an error and doesn't block demo;
+  - a 402 gives the credits message and claims nothing;
+  - a 402 keeps the demo, while a successful Gmail sync removes it;
+  - after demo then Gmail, no demo rows remain (and Bob's are untouched);
+  - no demo company in the Gmail classifier's `existingApplications`, even with the demo rows deliberately left in place.
+
+  **Mutation-checked:** removing the source filter fails 1 test; making demo rate-limited and writing `lastSyncAt` fails 5.
+- **Playwright:**
+  - `sync-demo.spec.ts`: an immediate second demo sync now succeeds with nothing classified (it used to expect `rate_limited`), and the "re-sync after delete is refused" check is dropped (bounded by the app cap now).
+  - A new test: Gmail without credits shows the credits message, never "Synced", and keeps the demo cards.
+  - `board.spec.ts`: the demo label and Clear button appear, and Load demo data is hidden.
+
+**Verified by the agent:**
+- `tsc` and eslint clean; vitest **113 passed**, 2 real-model tests skipped by default.
+- Playwright **14/14** on a fresh `.wrangler/state`, then **14/14 again back-to-back** with no reset (the old 10-minute wait between runs is gone).
+- **One real assistant turn pair on the local dev server** (owner-billed, about $0.003 for 3 runs) after the schema change. All chat requests returned 200. Asked "What number was in my previous message?", the model returned the token from turn 1, which it could only get from the stored `ai-messages` rows that the server rebuilds history from.
+  - The agent's first two attempts were inconclusive and not counted: the board starts a new chat per mount (`chatId={null}`), so a reload shows an empty panel by design; and in one run the first reply had echoed the number.
+- One earlier full-suite run failed one `toHaveCount` check, with a skip from stale local rate-limit state left by the polish run earlier the same day. The failing test wasn't captured. The next run and both fresh runs passed. Not reproduced.
+
+**Not done:** no Gmail sync or `deleteMyData` against the user's account, nothing pushed or deployed.
