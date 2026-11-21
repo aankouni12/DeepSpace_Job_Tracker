@@ -899,3 +899,21 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 **Not done: `docs/board.png` doesn't exist.** There's no `docs/` folder in the project. The only `board.png` is Playwright's screenshot of the test account's demo board in `.deepspace/test-results/`. The agent didn't guess, and asked the user.
 
 **Verified by the agent:** `tsc` and eslint clean; vitest **120 passed** (2 real-model tests skipped by default); Playwright **14/14** on fresh local state.
+
+**Shipped:** `/security-review` found nothing. The user pushed `main` @ `ef90d42`; the agent confirmed `main` = `origin/main` and deployed from PowerShell at `C:\`. Live checks:
+- `tests/assistant.live.ts` passed.
+- Signed out:
+  - `/` has the new title and no Google Fonts references; the self-hosted `.woff2` is served as `font/woff2`.
+  - `/api-status` serves the same not-found page as any unknown route.
+  - `sync` and `clearDemoData` return 401.
+- Signed-in behaviour (demo limit, Clear demo data, the credits message) was not checked live; it's left for the reviewer test on a new account.
+
+---
+
+## 2026-11-20: README screenshot (branch `docs/readme-screenshot`)
+
+**Asked:** use the Playwright screenshot of the demo board as `docs/board.png`, after checking that it shows only demo data, no real names or emails, and is a reasonable size. No deploy (README only).
+
+**Done:** copied `.deepspace/test-results/board-first-run-…/board.png` (from `tests/board.spec.ts`).
+- Checked by viewing it: only the five fictional demo companies with the "Demo data" label; the account chip shows the test account name "Board Reviewer", and no email appears; 1280×720, 43 KB.
+- **Cosmetic:** it was captured as the demo sync finished, so the status line reads "Syncing. Cards appear as each batch is sorted." and the buttons are greyed out. The user may want to re-take it later.
