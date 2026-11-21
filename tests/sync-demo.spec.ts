@@ -100,6 +100,11 @@ test('demo sync: labels, injection, repeat, isolation, delete', async ({ users }
   const first = await post(a.page, '/api/actions/sync', { source: 'demo' })
   console.log('SYNC_1 ' + JSON.stringify(first.json))
   expect(first.status).toBe(200)
+  test.skip(
+    first.json.code === 'demo_limited',
+    "A has used its 5 demo syncs for today (each run deletes and reloads A's demo). " +
+      'rm -rf .wrangler/state for a fresh local run.',
+  )
   expect(first.json.success).toBe(true)
   const d = first.json.data
   if (d.classified > 0) {

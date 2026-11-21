@@ -20,6 +20,9 @@ export const syncStateSchema: CollectionSchema = {
     // Assistant message limit (owner-billed AI), written by /api/ai/chat.
     { name: 'chatWindowStart', storage: 'text', interpretation: { kind: 'datetime' } },
     { name: 'chatCount', storage: 'number', interpretation: 'plain' },
+    // Demo sync limit (owner-billed AI): 24 hours from the first counted demo sync.
+    { name: 'demoWindowStart', storage: 'text', interpretation: { kind: 'datetime' } },
+    { name: 'demoCount', storage: 'number', interpretation: 'plain' },
   ],
   ownerField: 'userId',
   uniqueOn: ['userId'],

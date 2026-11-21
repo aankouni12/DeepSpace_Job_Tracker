@@ -7,6 +7,7 @@ import {
   classifyAndWrite,
   clearDemoData,
   cleanRole,
+  DEMO_DAILY_LIMIT,
   deleteMyData,
   emptyStats,
   extractText,
@@ -635,6 +636,99 @@ describe('sync action: demo vs Gmail (fake tools)', () => {
     expect(seen).toContain('Acme')
     for (const n of names) expect(seen).not.toContain(n)
     tools.deleteWhere = realDeleteWhere
+  })
+})
+
+describe('sync action: per-user demo limit and Gmail-only users (fake tools)', () => {
+  const T = Date.UTC(2026, 10, 21, 9)
+  beforeEach(() => {
+    generateObject.mockReset()
+    vi.useFakeTimers({ now: T, toFake: ['Date'] })
+    return () => {
+      vi.useRealTimers()
+    }
+  })
+  const ctx = (tools: ActionTools) => ({ userId: 'alice', params: {}, tools, env: {} as Env, callerJwt: 'jwt' })
+
+  it(`allows ${DEMO_DAILY_LIMIT} demo syncs in 24 hours, then refuses before any AI call`, async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    for (let i = 1; i <= DEMO_DAILY_LIMIT; i++) {
+      expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
+      await clearDemoData(ctx(tools))
+    }
+    expect(db.syncState.get('alice')?.data).toMatchObject({ demoCount: DEMO_DAILY_LIMIT })
+    const calls = generateObject.mock.calls.length
+    vi.setSystemTime(T + 3 * 3600_000)
+    const res = await run(sync, tools, 'alice', { source: 'demo' })
+    expect(res).toMatchObject({
+      success: false,
+      code: 'demo_limited',
+      error: `You've loaded demo data ${DEMO_DAILY_LIMIT} times today. Try again in about 21 hours.`,
+      details: { retryAfterSeconds: 21 * 3600 },
+    })
+    expect(generateObject.mock.calls.length).toBe(calls)
+    expect(db.applications.size).toBe(0)
+    expect([...db.appUsage.values()][0].data.syncs).toBe(DEMO_DAILY_LIMIT) // the refusal isn't counted
+  })
+
+  it('starts a new demo window 24 hours after the first counted demo sync', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    db.syncState.set('alice', {
+      recordId: 'alice',
+      data: { userId: 'alice', demoWindowStart: new Date(T - 86_400_000).toISOString(), demoCount: DEMO_DAILY_LIMIT },
+    })
+    expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
+    expect(db.syncState.get('alice')?.data).toMatchObject({ demoWindowStart: new Date(T).toISOString(), demoCount: 1 })
+  })
+
+  it('a demo sync with nothing new does not count toward the demo limit', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    await run(sync, tools, 'alice', { source: 'demo' })
+    for (let i = 0; i < DEMO_DAILY_LIMIT + 2; i++) {
+      expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
+    }
+    expect(db.syncState.get('alice')?.data.demoCount).toBe(1)
+  })
+
+  it('a Gmail sync is not limited by the demo count', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools([{ messages: [gmailMessage('g1', 'Acme', T - 1000)] }])
+    db.syncState.set('alice', {
+      recordId: 'alice',
+      data: { userId: 'alice', demoWindowStart: new Date(T).toISOString(), demoCount: DEMO_DAILY_LIMIT },
+    })
+    expect((await run(sync, tools, 'alice', { source: 'gmail' })).success).toBe(true)
+  })
+
+  for (const [what, collection, row] of [
+    ['a Gmail application', 'applications', { userId: 'alice', source: 'gmail', company: 'Acme', role: 'Engineer', key: 'acme|engineer', status: 'applied' }],
+    ['only a not-job-related Gmail email', 'emails', { userId: 'alice', source: 'gmail', gmailMessageId: 'g9', classification: 'not_job_related' }],
+  ] as const) {
+    it(`refuses a demo sync when the user has ${what}, with no AI call and nothing counted`, async () => {
+      modelLabelsAllApplied()
+      const { db, tools } = fakeTools()
+      db[collection].set('x1', { recordId: 'x1', data: { ...row } })
+      const res = await run(sync, tools, 'alice', { source: 'demo' })
+      expect(res).toEqual({
+        success: false,
+        code: 'demo_unavailable',
+        error: "Demo data isn't available once you've synced Gmail, so demo and real applications never mix.",
+      })
+      expect(generateObject).not.toHaveBeenCalled()
+      expect([...db.applications.values(), ...db.emails.values()].some((r) => r.data.source === 'demo')).toBe(false)
+      expect(db.syncState.has('alice')).toBe(false)
+      expect(db.appUsage.size).toBe(0)
+    })
+  }
+
+  it("another user's Gmail data does not block Alice's demo", async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    db.emails.set('x1', { recordId: 'x1', data: { userId: 'bob', source: 'gmail', gmailMessageId: 'g9', classification: 'applied' } })
+    expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
   })
 })
 

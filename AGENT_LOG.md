@@ -23,7 +23,8 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
   - 30 messages per user per day and 200 per day app-wide;
   - "(reply shortened)" when a reply still hits the cap.
 - **Demo vs Gmail** (on `fix/security-review`): demo isn't rate-limited per user; limits are claimed only when something new goes to the AI; a Gmail sync replaces demo rows; a 402 shows the credits message; Demo data label and Clear demo data on the board.
-- **Tests:** 113 unit, plus 2 real-model tests (`RUN_MODEL_TESTS=1`); 14 Playwright; 1 post-deploy live check (`tests/assistant.live.ts`).
+- **Demo limits** (on `fix/demo-limits`): 5 demo syncs per user per 24 hours; the server refuses demo once the user has any Gmail data.
+- **Tests:** 120 unit, plus 2 real-model tests (`RUN_MODEL_TESTS=1`); 14 Playwright; 1 post-deploy live check (`tests/assistant.live.ts`).
 - **Workflow:** the agent commits and merges locally, and the user pushes. Deploy only when `main` = `origin/main`, from PowerShell at `C:\`, then run the live check.
 
 **Friday 2026-11-20 (polish, test, write):**
@@ -42,8 +43,9 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 - Outbound calls per request: a 100-email sync is about 175 calls and took about 76 s. Both work, but the platform limits aren't documented, so the cap stays at 100.
 - A first sync reaches only the newest 100 matching emails, about a month here. More than 100 new matches between syncs means the oldest are missed.
 - Rate-limit race: two requests in the same instant can both pass (accepted on purpose; bounded cost).
-- **One user can use up the app-wide sync cap:** with demo exempt from the per-user limit, a Clear demo → Load demo loop sends 12 emails to the AI each time. 100 loops (about $0.12) would block every user's syncs, Gmail included, until the next UTC day. Open question for the user.
-- **Zero-credit accounts can't connect Gmail:** the api-worker checks credits before OAuth, so "Connect Gmail" returns 402 and never reaches Google's consent screen. The credits message now says so plainly.
+- **App-wide sync cap:** one user can now use at most 5 of the 100 daily syncs on demo (`fix/demo-limits`). Many accounts together could still reach the cap, which is what it's for.
+- **Zero-credit accounts can't connect Gmail:** the api-worker checks credits before OAuth, so "Connect Gmail" returns 402 and never reaches Google's consent screen. The credits message says so, and the README tells reviewers to use demo data (the user decided that's enough).
+- **Possible flaky Playwright test (unexplained):** on 2026-11-20, one full-suite run before Part 2 of `fix/security-review` failed one `toHaveCount` check, with one skip, and the failing test's name wasn't captured. Every run since (4 full runs, 2 of them on fresh state) passed. If it recurs, capture the test name before re-running.
 - An email that never names its company is recorded as `not_job_related` and not retried.
 - Card count is 37 against the user's expected 29–35; there may still be some role splits (not checked by name).
 - Interview definition: AI-agent screenings count as Applied (Stellantis). That's a one-line prompt change if the user wants otherwise.
@@ -861,3 +863,39 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 - One earlier full-suite run failed one `toHaveCount` check, with a skip from stale local rate-limit state left by the polish run earlier the same day. The failing test wasn't captured. The next run and both fresh runs passed. Not reproduced.
 
 **Not done:** no Gmail sync or `deleteMyData` against the user's account, nothing pushed or deployed.
+
+**`/security-review`:** no findings. Merged into `main` locally (`3273084`).
+
+---
+
+## 2026-11-20: Demo limits and README note (branch `fix/demo-limits`)
+
+**Asked** (the user's answers to the agent's open questions):
+1. A per-user demo limit of **5 demo syncs per day**, so one user can't use up the app-wide cap for everyone.
+2. The credits message is enough. Add to the README: "Gmail sync needs DeepSpace credits. Reviewers can try everything with demo data."
+3. **The server refuses a demo sync when the user has any Gmail data**, because the UI isn't a security boundary.
+4. Commit `docs/board.png`, which the user said they'd added.
+5. Note the earlier unexplained test failure as a possible flaky test.
+
+**Built:**
+- **`src/actions/sync.ts`:**
+  - `DEMO_DAILY_LIMIT = 5`, a 24-hour window from the first counted demo sync, the same pattern as the assistant's per-user limit.
+  - Checked before any AI call; counted in `claim('demo')`, so only demo syncs that send something to the AI count.
+  - `hasGmailRows` queries the caller's `applications` and `emails` for `source: 'gmail'` (limit 1 each). If either has a row, a demo sync returns `demo_unavailable`.
+- **`src/schemas/sync-state-schema.ts`:** new `demoWindowStart` and `demoCount` columns. The row stays read-only for its owner, so nobody can reset their own count.
+- **README:** the credits line.
+- **Tests:** 7 new unit tests:
+  - 5 pass, then the 6th is refused, with retry hours, no AI call, and nothing counted app-wide;
+  - the window restarts after 24 hours;
+  - a demo with nothing new doesn't count;
+  - Gmail isn't limited by the demo count;
+  - demo is refused with a Gmail application, or with only a not-job-related Gmail email;
+  - Bob's Gmail data doesn't block Alice.
+
+  **Mutation-checked:** removing the Gmail-data refusal fails 2 tests; removing the demo limit fails 1.
+- **Playwright:** each run uses one of the 5 daily demos for Reviewer and for Board Reviewer, so `sync-demo.spec.ts` and `board.spec.ts` now skip with a printed reason after 5 local runs in 24 hours (`rm -rf .wrangler/state` resets).
+- **AGENT_LOG:** the unexplained failure is listed under "Open risks" as a possible flaky test.
+
+**Not done: `docs/board.png` doesn't exist.** There's no `docs/` folder in the project. The only `board.png` is Playwright's screenshot of the test account's demo board in `.deepspace/test-results/`. The agent didn't guess, and asked the user.
+
+**Verified by the agent:** `tsc` and eslint clean; vitest **120 passed** (2 real-model tests skipped by default); Playwright **14/14** on fresh local state.
