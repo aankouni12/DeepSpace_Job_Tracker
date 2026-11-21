@@ -52,6 +52,21 @@ test.describe('Smoke tests', () => {
     expect(offenders).toEqual([])
   })
 
+  test('landing links to /board and loads IBM Plex Sans from our own origin', async ({ page }) => {
+    const thirdPartyFonts: string[] = []
+    page.on('request', (req) => {
+      if (/fonts\.(googleapis|gstatic)\.com/.test(req.url())) thirdPartyFonts.push(req.url())
+    })
+    await page.goto('/')
+    await expect(page.getByRole('link', { name: 'Get started' })).toHaveAttribute('href', '/board')
+    // fonts.load resolves to the faces it actually loaded (empty if none match).
+    const loaded = await page.evaluate(async () =>
+      (await document.fonts.load('600 16px "IBM Plex Sans"')).map((f) => f.status),
+    )
+    expect(loaded).toEqual(['loaded'])
+    expect(thirdPartyFonts).toEqual([])
+  })
+
   test('dynamic app boundary mounts on /home', async ({ page }) => {
     await page.goto('/home')
     await expect(page.getByTestId('app-navigation')).toBeVisible({ timeout: 15000 })

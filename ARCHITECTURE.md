@@ -74,6 +74,8 @@ Generouted maps files to URLs. A parenthesised folder name is a group and does n
 | `src/pages/(app)/*.tsx` | `/home` | Auth and record providers mounted; sign-in optional |
 | `src/pages/(app)/(protected)/*.tsx` | `/settings` | Same, plus `AuthGate`: sign-in required |
 
+**Landing (`/`, `src/pages/index.tsx`).** It's static: a headline, what the app does, three privacy cards (read-only Gmail; email text sent to the AI to classify, then discarded, with only sender/subject/date/snippet kept for job emails; owner-only data and delete from Settings), and **Get started**, a plain link to `/board`, whose `AuthGate` handles sign-in. Title and description come from `src/seo.ts`. `tests/smoke.spec.ts` checks the link, that IBM Plex Sans loads from the app's own origin, and that no Google Fonts request is made.
+
 `src/pages/(app)/_layout.tsx` mounts `DeepSpaceAuthProvider`, then `RecordProvider` and `RecordScope(SCOPE_ID)`. Data hooks (`useQuery`, `useMutations`, `useAuth`) only work below it.
 
 ## Components
@@ -292,7 +294,7 @@ It **keeps `syncState.lastSyncAt`**, because deleting it would let a delete-then
   - Clicking a card opens a **timeline dialog**: each linked email's date, label, sender, subject and snippet, newest first. It's for spot-checking classification.
 - **Header:** "Last synced …" from `syncState.lastSyncAt`, the sync buttons, and the result or rate-limit message.
 - **Settings:** **Delete my synced data** opens a confirmation dialog, calls `deleteMyData`, and shows the counts.
-- **Theme:** `data-theme="applytrack"`, a cool light palette with one ink per status (`--status-applied` / `-interview` / `-offer` / `-rejected`). The font is IBM Plex Sans (Google Fonts link in `index.html`).
+- **Theme:** `data-theme="applytrack"`, a cool light palette with one ink per status (`--status-applied` / `-interview` / `-offer` / `-rejected`). The font is IBM Plex Sans, **self-hosted**: three Latin1 `.woff2` weights (400/500/600) from the official IBM/plex release `@ibm/plex-sans@1.1.0` in `public/fonts/`, with its SIL OFL license (`public/fonts/OFL.txt`) and `@font-face` rules in `src/themes.css`. The app makes no third-party font requests.
 - **Tests:** `tests/board.spec.ts` uses its own "Board Reviewer" test account, so it doesn't collide with the sync spec's accounts or rate limits. It checks:
   - first-run copy and buttons;
   - demo, giving 5 cards in the right lanes (Kestrel Systems in Applied, Maple Ridge Software in Rejected) and no `Acme`;

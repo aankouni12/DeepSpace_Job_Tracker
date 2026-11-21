@@ -27,8 +27,7 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 **Friday 2026-11-20 (polish, test, write):**
 1. **Polish:**
-   - Self-host IBM Plex Sans (drop the Google Fonts link).
-   - Check the signed-out landing page.
+   - ~~Self-host IBM Plex Sans; landing page; README~~ (done on `feature/polish`; README needs `docs/board.png` from the user).
    - If time allows, a sync progress message.
 2. **A full reviewer test on a brand-new account:** sign-in, demo data, board, the assistant (questions, decline, propose/Confirm/Cancel, stale cards), and delete.
 3. **Draft the writeup:**
@@ -740,3 +739,30 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 - The rejected list shows **all 12** with no truncation.
 - The **Stellantis** answer is complete.
 - **"What is a stack"** is still declined.
+
+---
+
+## 2026-11-20: Polish: landing page, README, self-hosted font (branch `feature/polish`)
+
+**Asked:**
+- Replace the scaffold landing text with applytrack's own (headline, what it does, three privacy points, a button to `/board`), static, in the board's look, and update `src/seo.ts`.
+- A short README.
+- Self-host IBM Plex Sans if it's small.
+
+**User's changes on approval:**
+- The button says **"Get started"**.
+- The privacy wording must be precise: email text **is** sent to the AI provider to classify, then discarded; don't imply it never leaves the account.
+- The README screenshot is a demo-data board at placeholder `docs/board.png`, which the user will add.
+- Fonts come from the official IBM/plex release, with its OFL license.
+
+**Built:**
+- **Landing** (`src/pages/index.tsx`): still static (no providers). Three privacy cards in the board's `bg-card` / `border-border` style. The "Email text is used only to sort" card names exactly what's kept, because the agent's first draft was wrong: checked against `emails-schema.ts`, job emails also keep `from` and Gmail's `snippet`, and unrelated mail keeps only an id. "Only you can see your applications, admins included" was checked against the schemas (owner-only read for every role).
+- **SEO** (`src/seo.ts`): title "applytrack | Job application tracker for Gmail" and a one-sentence description.
+- **README.md** (new).
+- **Font:** `@ibm/plex-sans@1.1.0` (the agent chose it over `1.3.6`, which was released two days earlier), Latin1 split `.woff2` for 400/500/600 (about 21 KB each), plus `OFL.txt`, in `public/fonts/`. Three `@font-face` rules in `src/themes.css`; the Google Fonts links are removed from `index.html`. Characters outside Latin1 fall back to the system fonts already in the stack.
+- **Test:** a new smoke test checks that "Get started" links to `/board`, that `document.fonts.load('600 … "IBM Plex Sans"')` returns one `loaded` face, and that there are no `fonts.googleapis` / `gstatic` requests. (`fonts.check()` was rejected because it returns true even when no matching face exists.)
+
+**Verified by the agent:**
+- `tsc` clean; vitest 97/97 (2 real-model tests skipped by default); Playwright **15/15** (14 plus the new one).
+- `vite build`: the prerendered `dist/client/index.html` has the new title, description, and copy, and no Google Fonts references; the three `.woff2` files are in `dist/client/fonts/`.
+- Screenshots of the built static page at 1280 and 390 px wide: Plex renders, the cards stack on the phone, and there's no horizontal scroll.

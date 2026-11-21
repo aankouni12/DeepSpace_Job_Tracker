@@ -79,6 +79,31 @@
   --status-rejected: #8b9590;
 }
 
+/* IBM Plex Sans, self-hosted from public/fonts/ (official IBM/plex release
+   @ibm/plex-sans@1.1.0, Latin1 subset; SIL OFL 1.1, see public/fonts/OFL.txt).
+   Only the weights the app uses: 400, 500, 600. */
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/IBMPlexSans-Regular-Latin1.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/IBMPlexSans-Medium-Latin1.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+  src: url('/fonts/IBMPlexSans-SemiBold-Latin1.woff2') format('woff2');
+}
+
 [data-theme="applytrack"] body {
   font-family: 'IBM Plex Sans', 'Segoe UI', Roboto, sans-serif;
 }
