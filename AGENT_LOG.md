@@ -8,7 +8,7 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 **The app is complete. Only the writeup and the submission remain** (hard deadline Saturday 2026-11-21, 11:59 PM ET; aim for early evening).
 
-**Deploy status:** production runs **`8cabc49`** (deployed 2026-11-21, live check and signed-in route probes passed). It includes the final security fixes: the integration proxy is closed, and the usage limits are atomic. The user's fresh-account test on production was on `ef90d42`, just before them.
+**Deploy status:** production runs **`8cabc49`** (deployed 2026-11-21, live check and signed-in route probes passed). It includes the final security fixes: the integration proxy is closed, and the usage limits are atomic. **Verified by the user on production at `8cabc49`:** Gmail sync on their own account, assistant answers, and demo load and clear on a fresh account. Usage for the last 30 days shows only `google` and `anthropic`, so the open proxy was never abused. **Total project cost so far: about $0.52.**
 
 What the app does:
 - Platform sign-in; read-only Gmail connection (`gmailRead` only); a static landing page.
@@ -1026,3 +1026,13 @@ Plus at most one summarizer call per message once history passes 30,000 characte
     - `GET /api/files/anything`
     - `POST /api/files/upload`
 - Not checked live: the ticket limits under parallel load (verified locally against the real RecordRoom), and a real Gmail sync (no account with credits was used).
+
+**Verified by the user on production at `8cabc49` (2026-11-21):**
+- Gmail sync on the user's own account works.
+- The assistant answers.
+- Demo load and Clear demo data work on a fresh account.
+
+**Usage and cost, reported by the user from the platform's usage view (last 30 days):**
+- Only two integrations were ever used: `google` ($0.30, 23 calls) and `anthropic` ($0.22, 260 calls).
+- **The open integration proxy was never abused:** none of the other 36 owner-billed integrations it exposed (`openai`, `email`, `fal`, …) shows any use.
+- **Total cost of the project so far: about $0.52**, covering development, testing and production use.
