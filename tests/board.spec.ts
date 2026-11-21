@@ -4,8 +4,8 @@
  * persists -> timeline -> delete from Settings -> first-run again -> Connect
  * Gmail with Google mocked via page.route (CLAUDE.md: tests mock Google OAuth).
  *
- * Needs an account with no data that isn't rate-limited: a fresh local state
- * (rm -rf .wrangler/state) or 10 minutes since this spec last ran.
+ * Needs an account with no data (this spec deletes it at the end). Demo syncs
+ * aren't rate-limited per user, so the spec can re-run right away.
  */
 import { test, expect, findTestAccountByName } from 'deepspace/testing'
 
@@ -42,6 +42,10 @@ test('first run, demo board, status change, timeline, delete, connect Gmail', as
   await expect(page.getByTestId('lane-rejected').getByText('Maple Ridge Software', { exact: true })).toBeVisible() // rejection in paragraph 2
   await expect(page.getByTestId('lane-applied').getByTestId('application-card')).toHaveCount(1)
   await expect(page.getByText('Acme')).toHaveCount(0) // demo-9 injection created nothing
+  // Demo rows are labeled and can be cleared; demo can't be loaded twice.
+  await expect(page.getByTestId('demo-label')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Clear demo data' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Load demo data' })).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('board.png'), fullPage: true })
 
   // Status change moves the card and survives a reload.

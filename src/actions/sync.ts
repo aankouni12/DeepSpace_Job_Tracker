@@ -23,6 +23,13 @@ import { EMAIL_CLASSIFICATIONS } from '../schemas/emails-schema'
 import { DEMO_EMAILS } from './demo-emails'
 
 const RATE_LIMIT_MS = 10 * 60 * 1000
+// App-wide circuit breaker on owner-billed classification: syncs per UTC day
+// across all accounts, on a closed appUsage row (`sync-YYYY-MM-DD`). Added
+// after an external security review (2026-11-20).
+export const APP_SYNC_DAILY_LIMIT = 100
+const DAY_MS = 86_400_000
+const GMAIL_CREDITS_MESSAGE =
+  'Gmail sync needs DeepSpace credits on your account. Try demo data to see how applytrack works.'
 const MAX_MESSAGES = 100 // per sync; keeps outbound calls per request ~200 (no bulk write API)
 const PAGE_SIZE = 50 // gmail-inbox caps maxResults at 50
 const BATCH_SIZE = 10
@@ -493,21 +500,34 @@ async function queryAll<T extends Record<string, unknown>>(
 }
 
 type SyncStateRow = { lastSyncAt?: string; cursorAt?: string | null }
+type AppUsageRow = { day: string; syncs?: number }
 
 /**
- * Rate limit (protects owner-billed AI). `retryAfterSeconds` > 0 refuses
- * within 10 minutes of the last sync; `claim` records this sync and runs only
- * once we are about to classify, so a requiresOAuth round trip does not lock
- * the user out. `setCursor` advances the Gmail cursor after a clean sync.
+ * Rate limits (protect owner-billed AI). `retryAfterSeconds` > 0 refuses a
+ * Gmail sync within 10 minutes of the caller's last Gmail sync (demo is
+ * exempt); `appRetryAfterSeconds` > 0 refuses everyone once today's app-wide
+ * count is reached. `claim` runs only once at least one new email is about to
+ * go to the AI: a Gmail sync records lastSyncAt and counts; a demo sync only
+ * counts. So an OAuth round trip, a failed fetch, or a sync with nothing new
+ * blocks nothing. `setCursor` advances the Gmail cursor after a clean sync.
+ * Two requests in the same instant can both pass (accepted race; bounded cost).
  */
 async function syncSlot(tools: ActionTools, userId: string, now: number) {
-  const existing = await tools.get<SyncStateRow>('syncState', userId)
+  const day = new Date(now).toISOString().slice(0, 10)
+  const appId = `sync-${day}`
+  const [existing, usage] = await Promise.all([
+    tools.get<SyncStateRow>('syncState', userId),
+    tools.get<AppUsageRow>('appUsage', appId),
+  ])
   const row = existing.success ? existing.data.record.data : undefined
   const last = Date.parse(row?.lastSyncAt ?? '')
   const retryAfterSeconds =
     Number.isFinite(last) && now - last < RATE_LIMIT_MS
       ? Math.ceil((RATE_LIMIT_MS - (now - last)) / 1000)
       : 0
+  const appSyncs = usage.success ? (usage.data.record.data.syncs ?? 0) : 0
+  const appRetryAfterSeconds =
+    appSyncs >= APP_SYNC_DAILY_LIMIT ? Math.ceil((Date.parse(`${day}T00:00:00.000Z`) + DAY_MS - now) / 1000) : 0
   let exists = existing.success
   const write = async (data: SyncStateRow) => {
     const res = exists
@@ -516,10 +536,20 @@ async function syncSlot(tools: ActionTools, userId: string, now: number) {
     if (!res.success) throw new Error(`syncState write failed: ${res.error}`)
     exists = true
   }
+  const countAppSync = async () => {
+    const res = usage.success
+      ? await tools.update('appUsage', appId, { syncs: appSyncs + 1 })
+      : await tools.create('appUsage', { day, syncs: 1 }, appId)
+    if (!res.success) throw new Error(`appUsage write failed: ${res.error}`)
+  }
   return {
     retryAfterSeconds,
+    appRetryAfterSeconds,
     cursorAt: row?.cursorAt || undefined,
-    claim: () => write({ lastSyncAt: new Date(now).toISOString() }),
+    claim: async (source: Source) => {
+      if (source === 'gmail') await write({ lastSyncAt: new Date(now).toISOString() })
+      await countAppSync()
+    },
     setCursor: (cursorAt: string) => write({ cursorAt }),
   }
 }
@@ -536,12 +566,21 @@ export const sync: ActionHandler<Env> = async ({ userId, params, tools, env }) =
   const now = Date.now()
 
   const slot = await syncSlot(tools, userId, now)
-  if (slot.retryAfterSeconds > 0) {
+  if (source === 'gmail' && slot.retryAfterSeconds > 0) {
     return {
       success: false,
       code: 'rate_limited',
       error: `Synced recently. Try again in ${slot.retryAfterSeconds} seconds.`,
       details: { retryAfterSeconds: slot.retryAfterSeconds },
+    }
+  }
+  if (slot.appRetryAfterSeconds > 0) {
+    const hours = Math.max(1, Math.ceil(slot.appRetryAfterSeconds / 3600))
+    return {
+      success: false,
+      code: 'app_limited',
+      error: `Sync has reached today's limit for everyone. Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`,
+      details: { retryAfterSeconds: slot.appRetryAfterSeconds },
     }
   }
 
@@ -550,13 +589,21 @@ export const sync: ActionHandler<Env> = async ({ userId, params, tools, env }) =
     inbox = demoInbox(now)
   } else {
     const fetched = await fetchGmail(tools, buildGmailQuery(slot.cursorAt))
-    if ('error' in fetched) return fetched.error as never
+    // A failed fetch is never an empty inbox: return the error, claim nothing.
+    if ('error' in fetched) {
+      const err = fetched.error as { status?: number; code?: string }
+      if (err.status === 402 || err.code === 'insufficient_credits') {
+        return { success: false, code: 'gmail_credits', error: GMAIL_CREDITS_MESSAGE }
+      }
+      return fetched.error as never
+    }
     if ('requiresOAuth' in fetched) {
       return { success: true, data: { requiresOAuth: true, authUrl: fetched.authUrl } }
     }
     inbox = fetched.emails
+    // Real data replaces demo data: never mix the two on one board.
+    await deleteRows(tools, { userId, source: 'demo' })
   }
-  await slot.claim()
 
   // Load this user's known message ids and applications once, up front.
   const known = new Set(
@@ -566,9 +613,21 @@ export const sync: ActionHandler<Env> = async ({ userId, params, tools, env }) =
   )
   const fresh = inbox.filter((e) => !known.has(e.id))
 
+  // Nothing new: no AI call, so no limit is claimed.
+  if (fresh.length === 0) {
+    if (source === 'gmail') await slot.setCursor(new Date(now).toISOString())
+    return {
+      success: true,
+      data: { source, fetched: inbox.length, skipped: inbox.length, classified: 0, failedBatches: 0, applicationsCreated: 0, applicationsUpdated: 0, ...emptyStats() },
+    }
+  }
+  await slot.claim(source)
+
+  // Only applications from the same source: real emails can never be matched
+  // onto demo cards (and demo onto real ones), nor see demo company names.
   const apps = new Map<string, AppState>() // by key
   const companies = new Map<string, string>() // normalized company -> display name
-  for (const r of await queryAll<AppRow>(tools, 'applications', { userId })) {
+  for (const r of await queryAll<AppRow>(tools, 'applications', { userId, source })) {
     const norm = normalizeCompany(r.data.company)
     apps.set(r.data.key, {
       recordId: r.recordId,
@@ -698,21 +757,36 @@ export const sync: ActionHandler<Env> = async ({ userId, params, tools, env }) =
 }
 
 /**
- * Delete the caller's synced emails and applications. Keeps syncState's
- * lastSyncAt (deleting it would let delete+sync loops bypass the rate limit
- * on owner-billed AI); clears cursorAt so the next Gmail sync starts fresh.
+ * Delete the caller's emails and applications matching `where`, which always
+ * includes the verified caller's userId (never params or email content).
  */
-export const deleteMyData: ActionHandler<Env> = async ({ userId, tools }) => {
+async function deleteRows(tools: ActionTools, where: { userId: string; source?: Source }) {
   const deleted: Record<string, number> = {}
   for (const collection of ['emails', 'applications']) {
     deleted[collection] = 0
     for (;;) {
-      const res = await tools.deleteWhere(collection, { userId }, 500)
+      const res = await tools.deleteWhere(collection, where, 500)
       if (!res.success) throw new Error(`delete ${collection} failed: ${res.error}`)
       deleted[collection] += res.data.deleted
       if (res.data.deleted < 500) break
     }
   }
+  return deleted
+}
+
+/** Remove only the caller's demo rows (the board's "Clear demo data"). */
+export const clearDemoData: ActionHandler<Env> = async ({ userId, tools }) => ({
+  success: true,
+  data: { deleted: await deleteRows(tools, { userId, source: 'demo' }) },
+})
+
+/**
+ * Delete the caller's synced emails and applications. Keeps syncState's
+ * lastSyncAt (deleting it would let delete+sync loops bypass the rate limit
+ * on owner-billed AI); clears cursorAt so the next Gmail sync starts fresh.
+ */
+export const deleteMyData: ActionHandler<Env> = async ({ userId, tools }) => {
+  const deleted = await deleteRows(tools, { userId })
   const state = await tools.get('syncState', userId)
   if (state.success) {
     const res = await tools.update('syncState', userId, { cursorAt: null })

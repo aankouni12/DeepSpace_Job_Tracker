@@ -67,7 +67,16 @@ export function useSync(syncState?: { lastSyncAt?: string; cursorAt?: string | n
     void run('gmail', true)
   }, [gmailConnected, stateReady, syncState?.cursorAt, run])
 
-  return { running, message, gmailConnected, run }
+  // Removes only the caller's demo rows (clearDemoData action, server-side).
+  const clearDemo = useCallback(async () => {
+    setRunning('demo')
+    setMessage(null)
+    const r = await callAction('clearDemoData')
+    setRunning(null)
+    setMessage(r.success ? 'Demo data cleared.' : r.error || 'Could not clear demo data. Try again.')
+  }, [])
+
+  return { running, message, gmailConnected, run, clearDemo }
 }
 
 function lastSynced(iso?: string): string | null {
@@ -83,23 +92,44 @@ function lastSynced(iso?: string): string | null {
 export function SyncControls({
   sync,
   lastSyncAt,
+  hasGmailData,
+  hasDemoData,
 }: {
   sync: ReturnType<typeof useSync>
   lastSyncAt?: string
+  /** The board shows real Gmail rows: demo can't be loaded alongside them. */
+  hasGmailData: boolean
+  /** The board shows demo rows: label them and offer to clear them. */
+  hasDemoData: boolean
 }) {
-  const { running, message, gmailConnected, run } = sync
+  const { running, message, gmailConnected, run, clearDemo } = sync
   return (
     <div className="flex flex-col items-start gap-2 sm:items-end">
-      <div className="flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => run('demo')}
-          disabled={running !== null}
-          loading={running === 'demo'}
-        >
-          Load demo data
-        </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        {hasDemoData && (
+          <>
+            <span
+              className="rounded-md border border-border bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+              data-testid="demo-label"
+            >
+              Demo data
+            </span>
+            <Button size="sm" variant="outline" onClick={clearDemo} disabled={running !== null}>
+              Clear demo data
+            </Button>
+          </>
+        )}
+        {!hasGmailData && !hasDemoData && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => run('demo')}
+            disabled={running !== null}
+            loading={running === 'demo'}
+          >
+            Load demo data
+          </Button>
+        )}
         <Button
           size="sm"
           onClick={() => run('gmail')}

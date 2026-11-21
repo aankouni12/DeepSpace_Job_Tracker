@@ -23,9 +23,11 @@ export interface Application {
   role: string
   status: Status
   lastActivityAt?: string
+  source?: 'gmail' | 'demo'
 }
 
 export interface EmailRow {
+  source?: 'gmail' | 'demo'
   applicationId?: string
   classification: string
   receivedAt?: string

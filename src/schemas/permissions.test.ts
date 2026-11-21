@@ -114,7 +114,39 @@ describe('assistant chats and messages', () => {
         expect(canDelete(schema, role, record, BOB)).toBe(false)
       }
     })
+
+    // External security review: a stored role "system" message is replayed
+    // as a system prompt, and edited content/summaries bypass the cost caps.
+    it(`${name}: the owner can delete but not update them, admin included`, () => {
+      for (const role of ['member', 'admin', 'viewer', '*']) {
+        expect(canUpdate(schema, role, record, ALICE)).toBe(false)
+      }
+      for (const role of ['member', 'admin']) {
+        expect(canDelete(schema, role, record, ALICE)).toBe(true)
+      }
+    })
   }
+
+  // RecordRoom denies any update when canUpdate is false (and canUpdate also
+  // gates Yjs text writes), so no field of these rows is client-writable.
+  // checkFieldPermissions is not the gate here: it only applies writableFields.
+  it('the owner cannot change a message role or content', () => {
+    const messages = schemas.find((s) => s.name === 'ai-messages')!
+    const systemMessage = { ...aliceMessage, data: { ...aliceMessage.data, role: 'system' } }
+    for (const role of ['member', 'admin']) {
+      expect(canUpdate(messages, role, aliceMessage, ALICE)).toBe(false)
+      expect(canUpdate(messages, role, systemMessage, ALICE)).toBe(false)
+    }
+  })
+
+  it('the owner cannot change a chat summary, its cutoff, or its title directly', () => {
+    const chats = schemas.find((s) => s.name === 'ai-chats')!
+    const compacted = { ...aliceChat, data: { ...aliceChat.data, compactedSummary: 's', compactedThroughId: 'm9' } }
+    for (const role of ['member', 'admin']) {
+      expect(canUpdate(chats, role, aliceChat, ALICE)).toBe(false)
+      expect(canUpdate(chats, role, compacted, ALICE)).toBe(false)
+    }
+  })
 })
 
 describe('appUsage (app-wide assistant counter)', () => {

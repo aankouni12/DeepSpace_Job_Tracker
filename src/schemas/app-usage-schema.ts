@@ -1,11 +1,11 @@
 /**
- * App usage — app-wide counters, one row per UTC day (record id
- * `assistant-YYYY-MM-DD`). The circuit breaker for owner-billed assistant
- * messages across all accounts.
+ * App usage — app-wide counters, one row per counter per UTC day: the
+ * circuit breakers for owner-billed AI across all accounts.
+ *   `assistant-YYYY-MM-DD` → assistantMessages (src/ai/chat-routes.ts)
+ *   `sync-YYYY-MM-DD`      → syncs (src/actions/sync.ts)
  *
  * Closed to every role, admin included: written and read only by server code
- * (src/ai/chat-routes.ts, through the RBAC-off action tools), so no user can
- * see or reset it.
+ * (through the RBAC-off action tools), so no user can see or reset it.
  */
 
 import type { CollectionSchema, RolePermissions } from 'deepspace/schema'
@@ -17,6 +17,7 @@ export const appUsageSchema: CollectionSchema = {
   columns: [
     { name: 'day', storage: 'text', interpretation: 'plain', required: true, immutable: true },
     { name: 'assistantMessages', storage: 'number', interpretation: 'plain' },
+    { name: 'syncs', storage: 'number', interpretation: 'plain' },
   ],
   permissions: {
     '*': closed,
