@@ -21,15 +21,18 @@ import type { ActionHandler, ActionTools } from 'deepspace/worker'
 import type { Env } from '../../worker'
 import { EMAIL_CLASSIFICATIONS } from '../schemas/emails-schema'
 import { DEMO_EMAILS } from './demo-emails'
+import { claimTicket, isFull, releaseTicket, secondsToNextUtcDay, utcDay } from '../server/usage-tickets'
 
+// Limits on owner-billed classification. All are atomic ticket scopes
+// (src/server/usage-tickets.ts), so parallel requests can't all pass.
+// - Gmail, per user: one sync that classifies new emails per 10 minutes.
 const RATE_LIMIT_MS = 10 * 60 * 1000
-// App-wide circuit breaker on owner-billed classification: syncs per UTC day
-// across all accounts, on a closed appUsage row (`sync-YYYY-MM-DD`). Added
-// after an external security review (2026-11-20).
-export const APP_SYNC_DAILY_LIMIT = 100
-const DAY_MS = 86_400_000
-// Per-user demo limit, so one user's clear-and-reload loop can't use up the
-// app-wide cap for everyone. A 24-hour window from the first counted demo sync.
+// - App-wide, per UTC day, separately for Gmail and demo, so demo abuse can't
+//   block real syncs.
+export const APP_GMAIL_DAILY_LIMIT = 100
+export const APP_DEMO_DAILY_LIMIT = 100
+// - Demo, per user, per UTC day, so one user's clear-and-reload loop can't use
+//   up the app-wide demo cap for everyone.
 export const DEMO_DAILY_LIMIT = 5
 const DEMO_UNAVAILABLE_MESSAGE =
   "Demo data isn't available once you've synced Gmail, so demo and real applications never mix."
@@ -504,45 +507,21 @@ async function queryAll<T extends Record<string, unknown>>(
   }
 }
 
-type SyncStateRow = {
-  lastSyncAt?: string
-  cursorAt?: string | null
-  demoWindowStart?: string
-  demoCount?: number
-}
-type AppUsageRow = { day: string; syncs?: number }
+type SyncStateRow = { lastSyncAt?: string; cursorAt?: string | null }
 
 /**
- * Rate limits (protect owner-billed AI). `retryAfterSeconds` > 0 refuses a
- * Gmail sync within 10 minutes of the caller's last Gmail sync (demo is
- * exempt); `appRetryAfterSeconds` > 0 refuses everyone once today's app-wide
- * count is reached. `claim` runs only once at least one new email is about to
- * go to the AI: a Gmail sync records lastSyncAt and counts; a demo sync only
- * counts. So an OAuth round trip, a failed fetch, or a sync with nothing new
- * blocks nothing. `setCursor` advances the Gmail cursor after a clean sync.
- * Two requests in the same instant can both pass (accepted race; bounded cost).
+ * The caller's syncState row: `lastSyncAt` (shown as "Last synced", and the
+ * early 10-minute Gmail check with a precise retry time) and the Gmail cursor.
+ * The limits themselves are tickets (see syncLimits).
  */
 async function syncSlot(tools: ActionTools, userId: string, now: number) {
-  const day = new Date(now).toISOString().slice(0, 10)
-  const appId = `sync-${day}`
-  const [existing, usage] = await Promise.all([
-    tools.get<SyncStateRow>('syncState', userId),
-    tools.get<AppUsageRow>('appUsage', appId),
-  ])
+  const existing = await tools.get<SyncStateRow>('syncState', userId)
   const row = existing.success ? existing.data.record.data : undefined
   const last = Date.parse(row?.lastSyncAt ?? '')
   const retryAfterSeconds =
     Number.isFinite(last) && now - last < RATE_LIMIT_MS
       ? Math.ceil((RATE_LIMIT_MS - (now - last)) / 1000)
       : 0
-  const demoStart = Date.parse(row?.demoWindowStart ?? '')
-  const demoInWindow = Number.isFinite(demoStart) && now - demoStart < DAY_MS
-  const demoCount = demoInWindow ? (row?.demoCount ?? 0) : 0
-  const demoRetryAfterSeconds =
-    demoCount >= DEMO_DAILY_LIMIT ? Math.ceil((demoStart + DAY_MS - now) / 1000) : 0
-  const appSyncs = usage.success ? (usage.data.record.data.syncs ?? 0) : 0
-  const appRetryAfterSeconds =
-    appSyncs >= APP_SYNC_DAILY_LIMIT ? Math.ceil((Date.parse(`${day}T00:00:00.000Z`) + DAY_MS - now) / 1000) : 0
   let exists = existing.success
   const write = async (data: SyncStateRow) => {
     const res = exists
@@ -551,28 +530,68 @@ async function syncSlot(tools: ActionTools, userId: string, now: number) {
     if (!res.success) throw new Error(`syncState write failed: ${res.error}`)
     exists = true
   }
-  const countAppSync = async () => {
-    const res = usage.success
-      ? await tools.update('appUsage', appId, { syncs: appSyncs + 1 })
-      : await tools.create('appUsage', { day, syncs: 1 }, appId)
-    if (!res.success) throw new Error(`appUsage write failed: ${res.error}`)
-  }
   return {
     retryAfterSeconds,
-    appRetryAfterSeconds,
-    demoRetryAfterSeconds,
     cursorAt: row?.cursorAt || undefined,
-    claim: async (source: Source) => {
-      if (source === 'gmail') await write({ lastSyncAt: new Date(now).toISOString() })
-      else
-        await write(
-          demoInWindow
-            ? { demoCount: demoCount + 1 }
-            : { demoWindowStart: new Date(now).toISOString(), demoCount: 1 },
-        )
-      await countAppSync()
-    },
+    recordGmailSync: () => write({ lastSyncAt: new Date(now).toISOString() }),
     setCursor: (cursorAt: string) => write({ cursorAt }),
+  }
+}
+
+/**
+ * Ticket scopes for one sync, built only from the verified userId and the
+ * server clock. Claimed only when at least one new email is about to go to
+ * the AI, so an OAuth round trip, a failed fetch, or a sync with nothing new
+ * uses nothing. Demo never touches lastSyncAt or the Gmail cursor.
+ */
+function syncLimits(source: Source, userId: string, now: number) {
+  const day = utcDay(now)
+  const bucket = Math.floor(now / RATE_LIMIT_MS)
+  return source === 'gmail'
+    ? {
+        user: { scope: `gmail-user-${userId}-${bucket}`, limit: 1 },
+        app: { scope: `sync-gmail-${day}`, limit: APP_GMAIL_DAILY_LIMIT },
+        userRetryAfterSeconds: Math.ceil(((bucket + 1) * RATE_LIMIT_MS - now) / 1000),
+      }
+    : {
+        user: { scope: `demo-user-${userId}-${day}`, limit: DEMO_DAILY_LIMIT },
+        app: { scope: `sync-demo-${day}`, limit: APP_DEMO_DAILY_LIMIT },
+        userRetryAfterSeconds: secondsToNextUtcDay(now),
+      }
+}
+
+const aboutHours = (seconds: number) => {
+  const hours = Math.max(1, Math.ceil(seconds / 3600))
+  return `Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`
+}
+
+function rateLimited(retryAfterSeconds: number) {
+  return {
+    success: false as const,
+    code: 'rate_limited',
+    error: `Synced recently. Try again in ${retryAfterSeconds} seconds.`,
+    details: { retryAfterSeconds },
+  }
+}
+
+function demoLimited(now: number) {
+  const retryAfterSeconds = secondsToNextUtcDay(now)
+  return {
+    success: false as const,
+    code: 'demo_limited',
+    error: `You've loaded demo data ${DEMO_DAILY_LIMIT} times today. ${aboutHours(retryAfterSeconds)}`,
+    details: { retryAfterSeconds },
+  }
+}
+
+function appLimited(source: Source, now: number) {
+  const retryAfterSeconds = secondsToNextUtcDay(now)
+  const what = source === 'gmail' ? 'Gmail sync' : 'Demo data'
+  return {
+    success: false as const,
+    code: 'app_limited',
+    error: `${what} has reached today's limit for everyone. ${aboutHours(retryAfterSeconds)}`,
+    details: { retryAfterSeconds },
   }
 }
 
@@ -588,37 +607,17 @@ export const sync: ActionHandler<Env> = async ({ userId, params, tools, env }) =
   const now = Date.now()
 
   const slot = await syncSlot(tools, userId, now)
-  if (source === 'gmail' && slot.retryAfterSeconds > 0) {
-    return {
-      success: false,
-      code: 'rate_limited',
-      error: `Synced recently. Try again in ${slot.retryAfterSeconds} seconds.`,
-      details: { retryAfterSeconds: slot.retryAfterSeconds },
-    }
-  }
-  if (slot.appRetryAfterSeconds > 0) {
-    const hours = Math.max(1, Math.ceil(slot.appRetryAfterSeconds / 3600))
-    return {
-      success: false,
-      code: 'app_limited',
-      error: `Sync has reached today's limit for everyone. Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`,
-      details: { retryAfterSeconds: slot.appRetryAfterSeconds },
-    }
-  }
+  const limits = syncLimits(source, userId, now)
+  // Early refusals, before any paid work (a Gmail fetch bills the user). They
+  // read without claiming; the atomic claim below is what enforces the limits.
+  if (source === 'gmail' && slot.retryAfterSeconds > 0) return rateLimited(slot.retryAfterSeconds)
+  if (await isFull(tools, limits.app.scope, limits.app.limit)) return appLimited(source, now)
   if (source === 'demo') {
     // Server-enforced, not just hidden in the UI: demo and real data never mix.
     if (await hasGmailRows(tools, userId)) {
       return { success: false, code: 'demo_unavailable', error: DEMO_UNAVAILABLE_MESSAGE }
     }
-    if (slot.demoRetryAfterSeconds > 0) {
-      const hours = Math.max(1, Math.ceil(slot.demoRetryAfterSeconds / 3600))
-      return {
-        success: false,
-        code: 'demo_limited',
-        error: `You've loaded demo data ${DEMO_DAILY_LIMIT} times today. Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`,
-        details: { retryAfterSeconds: slot.demoRetryAfterSeconds },
-      }
-    }
+    if (await isFull(tools, limits.user.scope, limits.user.limit)) return demoLimited(now)
   }
 
   let inbox: InboxEmail[]
@@ -658,7 +657,16 @@ export const sync: ActionHandler<Env> = async ({ userId, params, tools, env }) =
       data: { source, fetched: inbox.length, skipped: inbox.length, classified: 0, failedBatches: 0, applicationsCreated: 0, applicationsUpdated: 0, ...emptyStats() },
     }
   }
-  await slot.claim(source)
+  // Something new goes to the AI: claim the per-user slot, then the app-wide
+  // one (giving the user slot back if the app-wide limit refuses).
+  const userTicket = await claimTicket(tools, limits.user.scope, limits.user.limit)
+  if (!userTicket) return source === 'gmail' ? rateLimited(limits.userRetryAfterSeconds) : demoLimited(now)
+  const appTicket = await claimTicket(tools, limits.app.scope, limits.app.limit)
+  if (!appTicket) {
+    await releaseTicket(tools, userTicket)
+    return appLimited(source, now)
+  }
+  if (source === 'gmail') await slot.recordGmailSync()
 
   // Only applications from the same source: real emails can never be matched
   // onto demo cards (and demo onto real ones), nor see demo company names.

@@ -5,16 +5,18 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { streamDeepSpaceAgent } from 'deepspace/worker'
-import type { ActionTools } from 'deepspace/worker'
+import { fakeTicketTools } from '../server/usage-tickets.fake'
 import {
   APP_DAILY_LIMIT,
   ASSISTANT_CONTEXT_CONFIG,
   ASSISTANT_MAX_OUTPUT_TOKENS,
   ASSISTANT_MAX_TOOL_CALLS,
   CHAT_DAILY_LIMIT,
+  MAX_TITLE_LENGTH,
   SHORTENED_NOTE,
   assistantStreamSettings,
   claimChatMessage,
+  clipTitle,
   limitMessage,
   markShortened,
 } from './chat-routes'
@@ -22,83 +24,74 @@ import {
 const HOUR = 60 * 60 * 1000
 const T0 = Date.parse('2026-11-19T12:00:00.000Z')
 
-/** In-memory syncState + appUsage, keyed by record id, like the action tools. */
-function fakeTools(initial: Record<string, Record<string, Record<string, unknown>>> = {}) {
-  const db: Record<string, Map<string, Record<string, unknown>>> = {
-    syncState: new Map(Object.entries(initial.syncState ?? {})),
-    appUsage: new Map(Object.entries(initial.appUsage ?? {})),
-  }
-  const tools = {
-    get: async (c: string, id: string) =>
-      db[c].has(id)
-        ? { success: true, data: { record: { recordId: id, data: db[c].get(id) } } }
-        : { success: false, error: 'not found' },
-    update: async (c: string, id: string, data: Record<string, unknown>) => {
-      db[c].set(id, { ...db[c].get(id), ...data })
-      return { success: true, data: {} }
-    },
-    create: async (c: string, data: Record<string, unknown>, id: string) => {
-      db[c].set(id, data)
-      return { success: true, data: {} }
-    },
-  } as unknown as ActionTools
-  return { tools, db }
-}
-
-describe('claimChatMessage: per-user limit', () => {
-  it(`allows ${CHAT_DAILY_LIMIT} messages, then refuses with a retry time`, async () => {
-    const { tools, db } = fakeTools()
+describe('claimChatMessage: per-user limit (atomic tickets)', () => {
+  it(`allows ${CHAT_DAILY_LIMIT} messages per UTC day, then refuses until midnight UTC`, async () => {
+    const { tools, count } = fakeTicketTools()
     for (let i = 1; i <= CHAT_DAILY_LIMIT; i++) {
       expect(await claimChatMessage(tools, 'alice', T0 + i * 1000)).toEqual({ ok: true })
     }
-    expect(db.syncState.get('alice')).toMatchObject({ userId: 'alice', chatCount: CHAT_DAILY_LIMIT })
     const refused = await claimChatMessage(tools, 'alice', T0 + 2 * HOUR)
-    // The window opened at the first message (T0 + 1 s), so it reopens at T0 + 24 h + 1 s.
-    expect(refused).toEqual({ ok: false, scope: 'user', retryAfterSeconds: 22 * 60 * 60 + 1 })
-    expect(db.syncState.get('alice')?.chatCount).toBe(CHAT_DAILY_LIMIT)
+    expect(refused).toEqual({ ok: false, scope: 'user', retryAfterSeconds: 10 * 60 * 60 }) // 14:00 -> 00:00 UTC
+    expect(count('assistant-user-alice-2026-11-19')).toBe(CHAT_DAILY_LIMIT)
     // A per-user refusal doesn't use up the app-wide budget.
-    expect(db.appUsage.get('assistant-2026-11-19')?.assistantMessages).toBe(CHAT_DAILY_LIMIT)
+    expect(count('assistant-app-2026-11-19')).toBe(CHAT_DAILY_LIMIT)
   })
 
-  it('starts a new window 24 hours after the first message', async () => {
-    const { tools, db } = fakeTools({
-      syncState: { alice: { userId: 'alice', chatWindowStart: new Date(T0).toISOString(), chatCount: CHAT_DAILY_LIMIT } },
-    })
-    expect((await claimChatMessage(tools, 'alice', T0 + 24 * HOUR - 1000)).ok).toBe(false)
-    expect(await claimChatMessage(tools, 'alice', T0 + 24 * HOUR)).toEqual({ ok: true })
-    expect(db.syncState.get('alice')).toMatchObject({ chatCount: 1, chatWindowStart: new Date(T0 + 24 * HOUR).toISOString() })
+  it('50 parallel messages from one user: exactly the limit get through', async () => {
+    const { tools, count } = fakeTicketTools()
+    const results = await Promise.all(Array.from({ length: 50 }, () => claimChatMessage(tools, 'alice', T0)))
+    expect(results.filter((r) => r.ok)).toHaveLength(CHAT_DAILY_LIMIT)
+    expect(results.filter((r) => !r.ok && r.scope === 'user')).toHaveLength(50 - CHAT_DAILY_LIMIT)
+    expect(count('assistant-app-2026-11-19')).toBe(CHAT_DAILY_LIMIT)
   })
 
-  it("keeps sync's fields on an existing row, and counts users separately", async () => {
-    const { tools, db } = fakeTools({ syncState: { alice: { userId: 'alice', lastSyncAt: 'x', cursorAt: 'y' } } })
-    await claimChatMessage(tools, 'alice', T0)
-    await claimChatMessage(tools, 'bob', T0)
-    expect(db.syncState.get('alice')).toMatchObject({ lastSyncAt: 'x', cursorAt: 'y', chatCount: 1 })
-    expect(db.syncState.get('bob')).toMatchObject({ userId: 'bob', chatCount: 1 })
-    expect(db.appUsage.get('assistant-2026-11-19')).toEqual({ day: '2026-11-19', assistantMessages: 2 })
+  it('starts a new allowance on the next UTC day, and counts users separately', async () => {
+    const { tools, fill, count } = fakeTicketTools()
+    fill('assistant-user-alice-2026-11-19', CHAT_DAILY_LIMIT)
+    const midnight = Date.parse('2026-11-20T00:00:00.000Z')
+    expect((await claimChatMessage(tools, 'alice', midnight - 1000)).ok).toBe(false)
+    expect(await claimChatMessage(tools, 'bob', midnight - 1000)).toEqual({ ok: true })
+    expect(await claimChatMessage(tools, 'alice', midnight)).toEqual({ ok: true })
+    expect(count('assistant-user-alice-2026-11-20')).toBe(1)
   })
 })
 
-describe('claimChatMessage: app-wide limit', () => {
-  it(`refuses everyone at ${APP_DAILY_LIMIT} messages per UTC day, without counting the user`, async () => {
-    const { tools, db } = fakeTools({
-      appUsage: { 'assistant-2026-11-19': { day: '2026-11-19', assistantMessages: APP_DAILY_LIMIT - 1 } },
-    })
+describe('claimChatMessage: app-wide limit (atomic tickets)', () => {
+  it(`refuses everyone at ${APP_DAILY_LIMIT} messages per UTC day, giving the user slot back`, async () => {
+    const { tools, fill, count } = fakeTicketTools()
+    fill('assistant-app-2026-11-19', APP_DAILY_LIMIT - 1)
     expect(await claimChatMessage(tools, 'alice', T0)).toEqual({ ok: true })
     const refused = await claimChatMessage(tools, 'bob', T0)
     expect(refused).toEqual({ ok: false, scope: 'app', retryAfterSeconds: 12 * 60 * 60 }) // until 00:00 UTC
-    expect(db.syncState.has('bob')).toBe(false)
-    expect(db.appUsage.get('assistant-2026-11-19')?.assistantMessages).toBe(APP_DAILY_LIMIT)
+    expect(count('assistant-user-bob-2026-11-19')).toBe(0) // released
+    expect(count('assistant-app-2026-11-19')).toBe(APP_DAILY_LIMIT)
   })
 
-  it('starts a fresh counter on the next UTC day', async () => {
-    const { tools, db } = fakeTools({
-      appUsage: { 'assistant-2026-11-19': { day: '2026-11-19', assistantMessages: APP_DAILY_LIMIT } },
-    })
+  it('parallel messages from many users never pass the app-wide limit', async () => {
+    const { tools, fill, count } = fakeTicketTools()
+    fill('assistant-app-2026-11-19', APP_DAILY_LIMIT - 5)
+    const results = await Promise.all(Array.from({ length: 40 }, (_, i) => claimChatMessage(tools, `u${i}`, T0)))
+    expect(results.filter((r) => r.ok)).toHaveLength(5)
+    expect(count('assistant-app-2026-11-19')).toBe(APP_DAILY_LIMIT)
+    // Every refused user got their slot back.
+    for (let i = 0; i < 40; i++) expect(count(`assistant-user-u${i}-2026-11-19`)).toBeLessThanOrEqual(1)
+    const userSlots = Array.from({ length: 40 }, (_, i) => count(`assistant-user-u${i}-2026-11-19`)).reduce((a, b) => a + b, 0)
+    expect(userSlots).toBe(5)
+  })
+
+  it('starts a fresh allowance on the next UTC day', async () => {
+    const { tools, fill, count } = fakeTicketTools()
+    fill('assistant-app-2026-11-19', APP_DAILY_LIMIT)
     const midnight = Date.parse('2026-11-20T00:00:00.000Z')
     expect((await claimChatMessage(tools, 'alice', midnight - 1000)).ok).toBe(false)
     expect(await claimChatMessage(tools, 'alice', midnight)).toEqual({ ok: true })
-    expect(db.appUsage.get('assistant-2026-11-20')).toEqual({ day: '2026-11-20', assistantMessages: 1 })
+    expect(count('assistant-app-2026-11-20')).toBe(1)
+  })
+
+  it('clips client-supplied chat titles to 100 characters', () => {
+    expect(MAX_TITLE_LENGTH).toBe(100)
+    expect(clipTitle('x'.repeat(100_000))).toHaveLength(100)
+    expect(clipTitle('My search')).toBe('My search')
   })
 
   it('tells users which limit they hit', () => {

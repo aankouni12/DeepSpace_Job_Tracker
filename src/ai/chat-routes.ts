@@ -35,6 +35,7 @@ import {
 import type { ActionTools, AgentToolAccessResult, AgentToolRouteOptions, ChatTurn } from 'deepspace/worker'
 import { buildSystemPrompt } from './tools.js'
 import { createActionTools } from '../server/action-routes.js'
+import { claimTicket, releaseTicket, secondsToNextUtcDay, utcDay } from '../server/usage-tickets.js'
 // Type-only — TypeScript strips these at runtime, so no circular import
 // with worker.ts (which imports `registerAiChatRoutes` from this file).
 import type { Env, AppContext } from '../../worker.js'
@@ -55,6 +56,9 @@ function recordRoomStub(env: Env): DurableObjectStub {
 // modelId is ignored) and bounds every cost driver of a message.
 const ASSISTANT_MODEL = 'claude-haiku-5-5'
 const MAX_USER_CONTENT_LENGTH = 2_000
+/** Chat titles from the client (create/rename) are clipped to this; never sent to the model. */
+export const MAX_TITLE_LENGTH = 100
+export const clipTitle = (title: string) => title.slice(0, MAX_TITLE_LENGTH)
 /**
  * Per model call (the SDK default is 64,000). A message makes at most
  * MAX_TOOL_CALLS + 1 calls. Haiku 5.5's hidden thinking counts against this
@@ -107,64 +111,32 @@ export function assistantStreamSettings(now: Date) {
   }
 }
 
-// Per-user message limit: a fixed 24-hour window that starts at the first
-// message. Stored on the caller's syncState row, which users can read but not
-// write (src/schemas/sync-state-schema.ts), so nobody can reset their own count.
+// Per-user message limit, per UTC day, and the app-wide circuit breaker across
+// all accounts. Both are atomic ticket scopes (src/server/usage-tickets.ts):
+// parallel requests can't all pass. Change either number here.
 export const CHAT_DAILY_LIMIT = 30
-const CHAT_WINDOW_MS = 24 * 60 * 60 * 1000
-
-// App-wide circuit breaker: messages per UTC day across all accounts, on an
-// appUsage row no role can read or write (src/schemas/app-usage-schema.ts).
-// Change this one number to raise or lower it.
 export const APP_DAILY_LIMIT = 200
-
-type ChatQuotaRow = { chatWindowStart?: string; chatCount?: number }
-type AppUsageRow = { day: string; assistantMessages?: number }
 
 export type ChatClaim =
   | { ok: true }
   | { ok: false; scope: 'user' | 'app'; retryAfterSeconds: number }
 
 /**
- * Count one message against the caller's limit and the app-wide limit, or
- * refuse it without counting anything. `tools` must be the server's RBAC-off
- * action tools; `userId` is the verified caller only. Two requests in the
- * same instant can both pass (same accepted race as sync).
+ * Take one message from the caller's daily limit and the app-wide one, or
+ * refuse without using either (a user slot taken before an app-wide refusal
+ * is given back). `tools` must be the server's RBAC-off action tools;
+ * `userId` is the verified caller only.
  */
 export async function claimChatMessage(tools: ActionTools, userId: string, now: number): Promise<ChatClaim> {
-  const day = new Date(now).toISOString().slice(0, 10)
-  const appId = `assistant-${day}`
-  const [userRes, appRes] = await Promise.all([
-    tools.get<ChatQuotaRow>('syncState', userId),
-    tools.get<AppUsageRow>('appUsage', appId),
-  ])
-
-  const appCount = appRes.success ? (appRes.data.record.data.assistantMessages ?? 0) : 0
-  if (appCount >= APP_DAILY_LIMIT) {
-    const nextDay = Date.parse(`${day}T00:00:00.000Z`) + CHAT_WINDOW_MS
-    return { ok: false, scope: 'app', retryAfterSeconds: Math.ceil((nextDay - now) / 1000) }
+  const day = utcDay(now)
+  const retryAfterSeconds = secondsToNextUtcDay(now)
+  const user = await claimTicket(tools, `assistant-user-${userId}-${day}`, CHAT_DAILY_LIMIT)
+  if (!user) return { ok: false, scope: 'user', retryAfterSeconds }
+  const app = await claimTicket(tools, `assistant-app-${day}`, APP_DAILY_LIMIT)
+  if (!app) {
+    await releaseTicket(tools, user)
+    return { ok: false, scope: 'app', retryAfterSeconds }
   }
-
-  const row = userRes.success ? userRes.data.record.data : undefined
-  const start = Date.parse(row?.chatWindowStart ?? '')
-  const inWindow = Number.isFinite(start) && now - start < CHAT_WINDOW_MS
-  const count = inWindow ? (row?.chatCount ?? 0) : 0
-  if (count >= CHAT_DAILY_LIMIT) {
-    return { ok: false, scope: 'user', retryAfterSeconds: Math.ceil((start + CHAT_WINDOW_MS - now) / 1000) }
-  }
-
-  const userData: ChatQuotaRow = inWindow
-    ? { chatCount: count + 1 }
-    : { chatWindowStart: new Date(now).toISOString(), chatCount: 1 }
-  const userWrite = userRes.success
-    ? await tools.update('syncState', userId, userData)
-    : await tools.create('syncState', { userId, ...userData }, userId)
-  if (!userWrite.success) throw new Error(`chat limit write failed: ${userWrite.error}`)
-
-  const appWrite = appRes.success
-    ? await tools.update('appUsage', appId, { assistantMessages: appCount + 1 })
-    : await tools.create('appUsage', { day, assistantMessages: 1 }, appId)
-  if (!appWrite.success) throw new Error(`app limit write failed: ${appWrite.error}`)
   return { ok: true }
 }
 
@@ -215,7 +187,7 @@ export function registerAiChatRoutes(
     const body = await c.req.json<{ title?: string }>().catch(() => ({}) as { title?: string })
     const stub = recordRoomStub(c.env)
     const chat = await createChat(stub, auth.userId, {
-      title: body.title ?? 'New chat',
+      title: typeof body.title === 'string' ? clipTitle(body.title) : 'New chat',
     })
     return c.json({ chat })
   })
@@ -233,7 +205,7 @@ export function registerAiChatRoutes(
 
     const body = await c.req.json<{ title?: string }>().catch(() => ({}) as { title?: string })
     const patch: { title?: string } = {}
-    if (typeof body.title === 'string') patch.title = body.title
+    if (typeof body.title === 'string') patch.title = clipTitle(body.title)
     // `updateChat` re-checks the chat; a delete racing this PATCH answers 404
     // instead of `ok: true` for a write that never landed.
     if (!(await updateChat(stub, id, auth.userId, patch)))

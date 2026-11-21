@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ActionTools } from 'deepspace/worker'
 import type { Env } from '../../worker'
 import {
-  APP_SYNC_DAILY_LIMIT,
+  APP_DEMO_DAILY_LIMIT,
+  APP_GMAIL_DAILY_LIMIT,
   buildGmailQuery,
   classifyAndWrite,
   clearDemoData,
@@ -303,7 +304,7 @@ function fakeTools(gmailPages: unknown[] = []) {
     emails: new Map(),
     applications: new Map(),
     syncState: new Map(),
-    appUsage: new Map(),
+    usageTickets: new Map(),
   }
   const gmailCalls: Array<Record<string, unknown>> = []
   let n = 0
@@ -313,9 +314,17 @@ function fakeTools(gmailPages: unknown[] = []) {
     get: async (c: string, id: string) =>
       db[c].has(id) ? { success: true, data: { record: db[c].get(id) } } : { success: false, error: 'not found' },
     create: async (c: string, data: Record<string, unknown>, id?: string) => {
+      // usageTickets is uniqueOn ['scope', 'n'], like the real schema.
+      if (c === 'usageTickets' && [...db[c].values()].some((r) => r.data.scope === data.scope && r.data.n === data.n)) {
+        return { success: false, error: `Duplicate: a record with scope=${data.scope}, n=${data.n} already exists` }
+      }
       const recordId = id ?? `r${++n}`
       db[c].set(recordId, { recordId, data: { ...data } })
       return { success: true, data: { recordId } }
+    },
+    remove: async (c: string, id: string) => {
+      db[c].delete(id)
+      return { success: true, data: {} }
     },
     update: async (c: string, id: string, data: Record<string, unknown>) => {
       Object.assign(db[c].get(id)!.data, data)
@@ -343,6 +352,14 @@ function fakeTools(gmailPages: unknown[] = []) {
     },
   }
   return { db, gmailCalls, tools: tools as unknown as ActionTools }
+}
+
+type Db = ReturnType<typeof fakeTools>['db']
+/** Slots taken in a ticket scope. */
+const ticketsIn = (db: Db, scope: string) => [...db.usageTickets.values()].filter((r) => r.data.scope === scope).length
+/** Take slots 1..k of a scope, as if earlier syncs had used them. */
+function fillTickets(db: Db, scope: string, k: number) {
+  for (let n = 1; n <= k; n++) db.usageTickets.set(`f-${scope}-${n}`, { recordId: `f-${scope}-${n}`, data: { scope, n } })
 }
 
 const gmailMessage = (id: string, company: string, ms: number) => ({
@@ -451,7 +468,7 @@ describe('sync action (Gmail, fake tools)', () => {
   })
 })
 
-describe('sync action: app-wide daily cap (fake tools)', () => {
+describe('sync action: app-wide daily caps, separate for demo and Gmail (fake tools)', () => {
   const T = Date.UTC(2026, 10, 20, 15) // 15:00 UTC, 9 hours before the next UTC day
   beforeEach(() => {
     generateObject.mockReset()
@@ -461,47 +478,81 @@ describe('sync action: app-wide daily cap (fake tools)', () => {
     }
   })
 
-  it(`counts each sync; the last of ${APP_SYNC_DAILY_LIMIT} passes`, async () => {
+  it(`takes the last of ${APP_DEMO_DAILY_LIMIT} app-wide demo slots`, async () => {
     modelLabelsAllApplied()
     const { db, tools } = fakeTools()
-    db.appUsage.set('sync-2026-11-20', { recordId: 'sync-2026-11-20', data: { day: '2026-11-20', syncs: APP_SYNC_DAILY_LIMIT - 1 } })
+    fillTickets(db, 'sync-demo-2026-11-20', APP_DEMO_DAILY_LIMIT - 1)
     const res = await run(sync, tools, 'alice', { source: 'demo' })
     expect(res.success).toBe(true)
-    expect(db.appUsage.get('sync-2026-11-20')?.data.syncs).toBe(APP_SYNC_DAILY_LIMIT)
+    expect(ticketsIn(db, 'sync-demo-2026-11-20')).toBe(APP_DEMO_DAILY_LIMIT)
+    expect(ticketsIn(db, 'demo-user-alice-2026-11-20')).toBe(1)
     expect(generateObject).toHaveBeenCalled()
   })
 
-  it('refuses everyone at the cap before any AI call, without using up the user slot', async () => {
+  it('refuses every demo sync at the demo cap before any AI call, using nothing', async () => {
     modelLabelsAllApplied()
     const { db, tools } = fakeTools()
-    db.appUsage.set('sync-2026-11-20', { recordId: 'sync-2026-11-20', data: { day: '2026-11-20', syncs: APP_SYNC_DAILY_LIMIT } })
+    fillTickets(db, 'sync-demo-2026-11-20', APP_DEMO_DAILY_LIMIT)
     const res = await run(sync, tools, 'alice', { source: 'demo' })
     expect(res).toMatchObject({
       success: false,
       code: 'app_limited',
-      error: "Sync has reached today's limit for everyone. Try again in about 9 hours.",
+      error: "Demo data has reached today's limit for everyone. Try again in about 9 hours.",
       details: { retryAfterSeconds: 9 * 3600 },
     })
     expect(generateObject).not.toHaveBeenCalled()
     expect(db.applications.size + db.emails.size).toBe(0)
-    expect(db.syncState.has('alice')).toBe(false)
-    expect(db.appUsage.get('sync-2026-11-20')?.data.syncs).toBe(APP_SYNC_DAILY_LIMIT)
+    expect(ticketsIn(db, 'demo-user-alice-2026-11-20')).toBe(0)
   })
 
-  it('starts a fresh count on the next UTC day', async () => {
+  it('a full demo cap does not block a Gmail sync (separate counters)', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools([{ messages: [gmailMessage('g1', 'Acme', T - 1000)] }])
+    fillTickets(db, 'sync-demo-2026-11-20', APP_DEMO_DAILY_LIMIT)
+    expect((await run(sync, tools, 'alice', { source: 'gmail' })).success).toBe(true)
+    expect(ticketsIn(db, 'sync-gmail-2026-11-20')).toBe(1)
+  })
+
+  it('refuses every Gmail sync at the Gmail cap, before the Gmail fetch', async () => {
+    const { db, gmailCalls, tools } = fakeTools([{ messages: [gmailMessage('g1', 'Acme', T - 1000)] }])
+    fillTickets(db, 'sync-gmail-2026-11-20', APP_GMAIL_DAILY_LIMIT)
+    const res = await run(sync, tools, 'alice', { source: 'gmail' })
+    expect(res).toMatchObject({ success: false, code: 'app_limited', error: "Gmail sync has reached today's limit for everyone. Try again in about 9 hours." })
+    expect(gmailCalls).toHaveLength(0)
+    expect(db.syncState.has('alice')).toBe(false)
+  })
+
+  it('starts fresh caps on the next UTC day', async () => {
     modelLabelsAllApplied()
     const { db, tools } = fakeTools()
-    db.appUsage.set('sync-2026-11-19', { recordId: 'sync-2026-11-19', data: { day: '2026-11-19', syncs: APP_SYNC_DAILY_LIMIT } })
-    const res = await run(sync, tools, 'alice', { source: 'demo' })
-    expect(res.success).toBe(true)
-    expect(db.appUsage.get('sync-2026-11-20')?.data).toEqual({ day: '2026-11-20', syncs: 1 })
+    fillTickets(db, 'sync-demo-2026-11-19', APP_DEMO_DAILY_LIMIT)
+    expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
+    expect(ticketsIn(db, 'sync-demo-2026-11-20')).toBe(1)
   })
 
   it('does not count a Gmail sync that stops at "connect Gmail first"', async () => {
     const { db, tools } = fakeTools([{ requiresOAuth: true, authUrl: 'https://consent.example' }])
     const res = await run(sync, tools, 'alice', { source: 'gmail' })
     expect(res).toMatchObject({ success: true, data: { requiresOAuth: true } })
-    expect(db.appUsage.size).toBe(0)
+    expect(db.usageTickets.size).toBe(0)
+    expect(generateObject).not.toHaveBeenCalled()
+  })
+
+  it('gives the user slot back when the app-wide cap fills between the check and the claim', async () => {
+    modelLabelsAllApplied()
+    const { db, tools } = fakeTools()
+    // The early check sees a free slot; a parallel sync takes it before this one claims.
+    const query = tools.query
+    let calls = 0
+    tools.query = (async (c: string, o: { where: Record<string, unknown> }) => {
+      if (c === 'usageTickets' && o.where.scope === 'sync-demo-2026-11-20' && ++calls === 2) {
+        fillTickets(db, 'sync-demo-2026-11-20', APP_DEMO_DAILY_LIMIT)
+      }
+      return query(c, o as never)
+    }) as typeof tools.query
+    const res = await run(sync, tools, 'alice', { source: 'demo' })
+    expect(res).toMatchObject({ success: false, code: 'app_limited' })
+    expect(ticketsIn(db, 'demo-user-alice-2026-11-20')).toBe(0) // released
     expect(generateObject).not.toHaveBeenCalled()
   })
 })
@@ -540,7 +591,7 @@ describe('sync action: demo vs Gmail (fake tools)', () => {
     expect(again.success).toBe(true)
     expect(db.applications.size).toBeGreaterThan(0)
     expect(db.syncState.get('alice')?.data.lastSyncAt).toBeUndefined()
-    expect([...db.appUsage.values()][0].data.syncs).toBe(2) // both still count app-wide
+    expect(db.usageTickets.size).toBe(4) // both count: per-user demo + app-wide demo, twice
   })
 
   it('a demo sync with nothing new costs no AI and counts nothing', async () => {
@@ -551,7 +602,7 @@ describe('sync action: demo vs Gmail (fake tools)', () => {
     const res = await run(sync, tools, 'alice', { source: 'demo' })
     expect(res).toMatchObject({ success: true, data: { classified: 0, applicationsCreated: 0 } })
     expect(generateObject.mock.calls.length).toBe(calls)
-    expect([...db.appUsage.values()][0].data.syncs).toBe(1)
+    expect(db.usageTickets.size).toBe(2) // only the first sync's two tickets
   })
 
   it('an empty Gmail sync claims nothing and does not block a demo or another Gmail sync', async () => {
@@ -561,7 +612,7 @@ describe('sync action: demo vs Gmail (fake tools)', () => {
     expect(empty).toMatchObject({ success: true, data: { fetched: 0, applicationsCreated: 0 } })
     expect(db.syncState.get('alice')?.data.lastSyncAt).toBeUndefined()
     expect(db.syncState.get('alice')?.data.cursorAt).toBeTruthy() // the fetch was clean
-    expect(db.appUsage.size).toBe(0)
+    expect(db.usageTickets.size).toBe(0)
     expect((await run(sync, tools, 'alice', { source: 'gmail' })).success).toBe(true)
     expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
   })
@@ -572,7 +623,7 @@ describe('sync action: demo vs Gmail (fake tools)', () => {
     const res = await run(sync, tools, 'alice', { source: 'gmail' })
     expect(res).toMatchObject({ success: false, error: 'Upstream error' })
     expect(db.syncState.has('alice')).toBe(false)
-    expect(db.appUsage.size).toBe(0)
+    expect(db.usageTickets.size).toBe(0)
     expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
   })
 
@@ -585,7 +636,7 @@ describe('sync action: demo vs Gmail (fake tools)', () => {
       error: 'Gmail sync needs DeepSpace credits on your account. Try demo data to see how applytrack works.',
     })
     expect(db.syncState.has('alice')).toBe(false)
-    expect(db.appUsage.size).toBe(0)
+    expect(db.usageTickets.size).toBe(0)
     expect(generateObject).not.toHaveBeenCalled()
   })
 
@@ -650,37 +701,59 @@ describe('sync action: per-user demo limit and Gmail-only users (fake tools)', (
   })
   const ctx = (tools: ActionTools) => ({ userId: 'alice', params: {}, tools, env: {} as Env, callerJwt: 'jwt' })
 
-  it(`allows ${DEMO_DAILY_LIMIT} demo syncs in 24 hours, then refuses before any AI call`, async () => {
+  it(`allows ${DEMO_DAILY_LIMIT} demo syncs per UTC day, then refuses before any AI call`, async () => {
     modelLabelsAllApplied()
     const { db, tools } = fakeTools()
     for (let i = 1; i <= DEMO_DAILY_LIMIT; i++) {
       expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
       await clearDemoData(ctx(tools))
     }
-    expect(db.syncState.get('alice')?.data).toMatchObject({ demoCount: DEMO_DAILY_LIMIT })
+    expect(ticketsIn(db, 'demo-user-alice-2026-11-21')).toBe(DEMO_DAILY_LIMIT)
     const calls = generateObject.mock.calls.length
-    vi.setSystemTime(T + 3 * 3600_000)
+    vi.setSystemTime(T + 3 * 3600_000) // 12:00 UTC
     const res = await run(sync, tools, 'alice', { source: 'demo' })
     expect(res).toMatchObject({
       success: false,
       code: 'demo_limited',
-      error: `You've loaded demo data ${DEMO_DAILY_LIMIT} times today. Try again in about 21 hours.`,
-      details: { retryAfterSeconds: 21 * 3600 },
+      error: `You've loaded demo data ${DEMO_DAILY_LIMIT} times today. Try again in about 12 hours.`,
+      details: { retryAfterSeconds: 12 * 3600 },
     })
     expect(generateObject.mock.calls.length).toBe(calls)
     expect(db.applications.size).toBe(0)
-    expect([...db.appUsage.values()][0].data.syncs).toBe(DEMO_DAILY_LIMIT) // the refusal isn't counted
+    expect(ticketsIn(db, 'sync-demo-2026-11-21')).toBe(DEMO_DAILY_LIMIT) // the refusal isn't counted
   })
 
-  it('starts a new demo window 24 hours after the first counted demo sync', async () => {
+  it('parallel demo syncs: exactly the limit get through to the AI', async () => {
+    // A script firing many demo syncs at once (the counter race this replaced).
+    const { db, tools } = fakeTools()
+    generateObject.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 5)) // keep the winners in flight together
+      return { object: { results: [] } }
+    })
+    const results = await Promise.all(Array.from({ length: 20 }, () => run(sync, tools, 'alice', { source: 'demo' })))
+    expect(results.filter((r) => r.success)).toHaveLength(DEMO_DAILY_LIMIT)
+    expect(results.filter((r) => !r.success && (r as { code?: string }).code === 'demo_limited')).toHaveLength(20 - DEMO_DAILY_LIMIT)
+    expect(ticketsIn(db, 'demo-user-alice-2026-11-21')).toBe(DEMO_DAILY_LIMIT)
+    expect(ticketsIn(db, 'sync-demo-2026-11-21')).toBe(DEMO_DAILY_LIMIT)
+  })
+
+  it('parallel Gmail syncs: one per user per 10 minutes', async () => {
+    modelLabelsAllApplied()
+    const pages = Array.from({ length: 10 }, () => ({ messages: [gmailMessage('g1', 'Acme', T - 1000)] }))
+    const { db, tools } = fakeTools(pages)
+    const results = await Promise.all(Array.from({ length: 10 }, () => run(sync, tools, 'alice', { source: 'gmail' })))
+    const passed = results.filter((r) => r.success)
+    expect(passed).toHaveLength(1)
+    expect(results.filter((r) => (r as { code?: string }).code === 'rate_limited')).toHaveLength(9)
+    expect(ticketsIn(db, 'sync-gmail-2026-11-21')).toBe(1)
+  })
+
+  it('starts a new demo allowance on the next UTC day', async () => {
     modelLabelsAllApplied()
     const { db, tools } = fakeTools()
-    db.syncState.set('alice', {
-      recordId: 'alice',
-      data: { userId: 'alice', demoWindowStart: new Date(T - 86_400_000).toISOString(), demoCount: DEMO_DAILY_LIMIT },
-    })
+    fillTickets(db, 'demo-user-alice-2026-11-20', DEMO_DAILY_LIMIT)
     expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
-    expect(db.syncState.get('alice')?.data).toMatchObject({ demoWindowStart: new Date(T).toISOString(), demoCount: 1 })
+    expect(ticketsIn(db, 'demo-user-alice-2026-11-21')).toBe(1)
   })
 
   it('a demo sync with nothing new does not count toward the demo limit', async () => {
@@ -690,16 +763,13 @@ describe('sync action: per-user demo limit and Gmail-only users (fake tools)', (
     for (let i = 0; i < DEMO_DAILY_LIMIT + 2; i++) {
       expect((await run(sync, tools, 'alice', { source: 'demo' })).success).toBe(true)
     }
-    expect(db.syncState.get('alice')?.data.demoCount).toBe(1)
+    expect(ticketsIn(db, 'demo-user-alice-2026-11-21')).toBe(1)
   })
 
   it('a Gmail sync is not limited by the demo count', async () => {
     modelLabelsAllApplied()
     const { db, tools } = fakeTools([{ messages: [gmailMessage('g1', 'Acme', T - 1000)] }])
-    db.syncState.set('alice', {
-      recordId: 'alice',
-      data: { userId: 'alice', demoWindowStart: new Date(T).toISOString(), demoCount: DEMO_DAILY_LIMIT },
-    })
+    fillTickets(db, 'demo-user-alice-2026-11-21', DEMO_DAILY_LIMIT)
     expect((await run(sync, tools, 'alice', { source: 'gmail' })).success).toBe(true)
   })
 
@@ -720,7 +790,7 @@ describe('sync action: per-user demo limit and Gmail-only users (fake tools)', (
       expect(generateObject).not.toHaveBeenCalled()
       expect([...db.applications.values(), ...db.emails.values()].some((r) => r.data.source === 'demo')).toBe(false)
       expect(db.syncState.has('alice')).toBe(false)
-      expect(db.appUsage.size).toBe(0)
+      expect(db.usageTickets.size).toBe(0)
     })
   }
 
@@ -965,7 +1035,9 @@ describe('sync action: names, roles and bodies (fake tools)', () => {
     // The key never changes; the stored role is filled in.
     expect(apps[0].data).toMatchObject({ key: 'acme|unspecified role', role: 'Engineer', status: 'interview' })
 
-    db.syncState.get('alice')!.data.lastSyncAt = '2000-01-01T00:00:00.000Z' // past the rate limit
+    // A later sync, past the 10-minute limit (the timestamp and its ticket).
+    db.syncState.get('alice')!.data.lastSyncAt = '2000-01-01T00:00:00.000Z'
+    for (const [k, r] of db.usageTickets) if (String(r.data.scope).startsWith('gmail-user-alice-')) db.usageTickets.delete(k)
     await run(sync, tools, 'alice', { source: 'gmail' })
     apps = [...db.applications.values()]
     expect(apps).toHaveLength(1)
