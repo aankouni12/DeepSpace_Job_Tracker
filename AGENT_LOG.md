@@ -8,9 +8,9 @@ Newest entries at the bottom. Each entry covers what was asked, what was built, 
 
 **The app is complete. Only the writeup and the submission remain** (hard deadline Saturday 2026-11-21, 11:59 PM ET; aim for early evening).
 
-**Deploy status:** production runs `ef90d42`, **verified by the user on production on a fresh account (2026-11-21)**. The final security fixes (branch `final/checks`) close a HIGH issue that is live in `ef90d42`, so they **need a deploy** after the user pushes.
+**Deploy status:** production runs **`8cabc49`** (deployed 2026-11-21, live check and signed-in route probes passed). It includes the final security fixes: the integration proxy is closed, and the usage limits are atomic. The user's fresh-account test on production was on `ef90d42`, just before them.
 
-What the app does (as of `final/checks`):
+What the app does:
 - Platform sign-in; read-only Gmail connection (`gmailRead` only); a static landing page.
 - **Data model** with per-user permissions:
   - `applications`, `emails` and `syncState` are owner-read, admin included; clients can change only an application's `status`.
@@ -1010,4 +1010,19 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 
 **Verified by the agent:** `tsc` and eslint clean; vitest **134 passed** (+2 real-model skipped); Playwright **15/15** on a clean `.wrangler/state`.
 
-**Needs a deploy**, because the HIGH issue is live in `ef90d42`.
+**`/security-review`:** no findings. Merged into `main` (`8cabc49`).
+
+**Deployed (2026-11-21):** the user pushed `main` @ `8cabc49`. The agent confirmed `main` = `origin/main` with a clean tree and deployed from PowerShell at `C:\dev\deepspace-job-tracker`; the edge and data plane were confirmed. **The HIGH issue is closed in production.**
+- `tests/assistant.live.ts` passed: the assistant panel opens on the board with no error screen.
+- **Signed-in probes on production** (temporary spec as the Board Reviewer test account, deleted after use):
+  - `GET /api/integrations/status` → **200**, with `gmailRead` in the body.
+  - **404** `{"error":"not_found"}` for:
+    - `POST /api/integrations/openai/chat`
+    - `POST /api/integrations/anthropic/messages`
+    - `POST /api/integrations/email/send`
+    - `POST /api/integrations/google/gmail-inbox`
+    - `GET /api/integrations`
+    - `DELETE /api/integrations/oauth/google/disconnect`
+    - `GET /api/files/anything`
+    - `POST /api/files/upload`
+- Not checked live: the ticket limits under parallel load (verified locally against the real RecordRoom), and a real Gmail sync (no account with credits was used).
