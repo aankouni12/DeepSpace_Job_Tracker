@@ -916,4 +916,6 @@ Plus at most one summarizer call per message once history passes 30,000 characte
 
 **Done:** copied `.deepspace/test-results/board-first-run-…/board.png` (from `tests/board.spec.ts`).
 - Checked by viewing it: only the five fictional demo companies with the "Demo data" label; the account chip shows the test account name "Board Reviewer", and no email appears; 1280×720, 43 KB.
-- **Cosmetic:** it was captured as the demo sync finished, so the status line reads "Syncing. Cards appear as each batch is sorted." and the buttons are greyed out. The user may want to re-take it later.
+- **Cosmetic:** it was captured as the demo sync finished, so the status line read "Syncing. Cards appear as each batch is sorted." and the buttons were greyed out.
+
+**Retaken (the user's request):** a temporary spec (deleted after use) on the local dev server, signed in as the Reviewer Two test account, whose demo board was already loaded, so no new sync and no AI cost. Before the shot it waited for all five cards in their final lanes, a sync status without "Syncing", and enabled **Clear demo data**, **Connect Gmail** and **Ask the assistant** buttons, then moved the mouse away. Checked by viewing it: only the five fictional demo companies with the "Demo data" label; the account chip shows "Reviewer Two" and no email appears; 1280×720, 41 KB.
